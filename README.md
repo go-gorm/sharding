@@ -9,14 +9,18 @@ Gorm Sharding plugin using SQL parser and replace for splits large tables into s
 
 Gorm Sharding 是一个业务污染小，高性能的数据库分表方案。通过 SQL 解析和替换，实现分表逻辑，让查询正确的根据规则执行到分表里面。
 
-![Example](./docs/query.svg)
-
 ## Features
 
 - Non-intrusive design. Load the plugin, specify the config, and all done.
 - Lighting-fast. No network based middlewares, as fast as Go.
 - Multiple database support. PostgreSQL tested, MySQL and SQLite is coming.
 - Allows you custom the Primary Key generator (Sequence, UUID, Snowflake ...).
+
+## Sharding process
+
+This graph show up how Gorm Sharding works.
+
+![Example](./docs/query.svg)
 
 ## Install
 
