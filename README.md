@@ -41,7 +41,6 @@ For config detail info, see [Godoc](https://pkg.go.dev/github.com/longbridge/gor
 ```go
 middleware := sharding.Register(map[string]sharding.Resolver{
 	"orders": {
-		EnableFullTable: true,
 		ShardingColumn: "user_id",
 		ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
 			switch user_id := value.(type) {
@@ -50,9 +49,6 @@ middleware := sharding.Register(map[string]sharding.Resolver{
 			default:
 				return "", errors.New("invalid user_id")
 			}
-		},
-		ShardingAlgorithmByPrimaryKey: func(id int64) (suffix string) {
-			return fmt.Sprintf("_%02d", keygen.TableIdx(id))
 		},
 		PrimaryKeyGenerate: func(tableIdx int64) int64 {
 			keygen.Snowflake()
