@@ -24,6 +24,7 @@ type Sharding struct {
 	querys sync.Map
 }
 
+//  Resolver composed by five configurable fields.
 type Resolver struct {
 	// EnableFullTable represents whether to enable full table.
 	// When enabled, data will double write to both main table and sharding table.
@@ -69,6 +70,8 @@ type Resolver struct {
 	PrimaryKeyGenerate func(tableIdx int64) int64
 }
 
+// Register takes a map, key is the original table name
+// and value is a Resolver.
 func Register(resolvers map[string]Resolver) Sharding {
 	return Sharding{Resolvers: resolvers}
 }
@@ -256,7 +259,6 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 }
 
 func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
-
 	err = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
 		if n, ok := node.(*sqlparser.BinaryExpr); ok {
 			if x, ok := n.X.(*sqlparser.Ident); ok {
