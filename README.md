@@ -1,7 +1,7 @@
 # Gorm Sharding
 
 [![Go](https://github.com/longbridgeapp/gorm-sharding/actions/workflows/go.yml/badge.svg)](https://github.com/longbridgeapp/gorm-sharding/actions/workflows/go.yml)
-[![GoDoc](https://godoc.org/github.com/longbridgeapp/gorm-sharding?status.svg)](https://godoc.org/github.com/longbridgeapp/gorm-sharding)
+[![Go Reference](https://pkg.go.dev/badge/github.com/longbridgeapp/gorm-sharding.svg)](https://pkg.go.dev/github.com/longbridgeapp/gorm-sharding)
 
 English | [简体中文](./README.zh-CN.md)
 
