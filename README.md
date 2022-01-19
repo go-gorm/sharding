@@ -43,18 +43,18 @@ Config the sharding middleware, register the tables which you want to shard. See
 
 ```go
 middleware := sharding.Register(map[string]sharding.Resolver{
-	"orders": {
-		ShardingColumn: "user_id",
-		ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-			if uid, ok := value.(int64); ok {
-				return fmt.Sprintf("_%02d", uid%4), nil
-			}
-			return "", errors.New("invalid user_id")
-		},
-		PrimaryKeyGenerate: func(tableIdx int64) int64 {
-			return node.Generate()
-		},
-	},
+    "orders": {
+        ShardingColumn: "user_id",
+        ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
+            if uid, ok := value.(int64); ok {
+                return fmt.Sprintf("_%02d", uid%4), nil
+            }
+            return "", errors.New("invalid user_id")
+        },
+        PrimaryKeyGenerate: func(tableIdx int64) int64 {
+            return node.Generate()
+        },
+    },
 })
 ```
 
