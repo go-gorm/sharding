@@ -3,8 +3,6 @@
 [![Go](https://github.com/longbridgeapp/gorm-sharding/actions/workflows/go.yml/badge.svg)](https://github.com/longbridgeapp/gorm-sharding/actions/workflows/go.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/longbridgeapp/gorm-sharding.svg)](https://pkg.go.dev/github.com/longbridgeapp/gorm-sharding)
 
-English | [简体中文](./README.zh-CN.md)
-
 Gorm Sharding plugin using SQL parser and replace for splits large tables into smaller ones, redirects Query into sharding tables. Give you a high performance database access.
 
 Gorm Sharding 是我们基于 Longbridge 的业务场景以及我们的实践经验构建出来的一个高性能的数据库分表中间件。
