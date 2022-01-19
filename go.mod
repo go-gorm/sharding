@@ -3,6 +3,7 @@ module gorm.io/sharding
 go 1.17
 
 require (
+	github.com/bwmarrin/snowflake v0.3.0
 	github.com/longbridgeapp/assert v0.1.0
 	github.com/longbridgeapp/sqlparser v0.2.0
 	gorm.io/driver/postgres v1.1.0

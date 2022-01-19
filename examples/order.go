@@ -23,8 +23,8 @@ func main() {
 		panic(err)
 	}
 
-	tables := []string{"orders_00", "orders_01", "orders_02", "orders_03"}
-	for _, table := range tables {
+	for i := 0; i < 64; i += 1 {
+		table := fmt.Sprintf("orders_%02d", i)
 		db.Exec(`DROP TABLE IF EXISTS ` + table)
 		db.Exec(`CREATE TABLE ` + table + ` (
 			id BIGSERIAL PRIMARY KEY,
@@ -38,21 +38,19 @@ func main() {
 		panic(err)
 	}
 
-	middleware := sharding.Register(map[string]sharding.Resolver{
-		"orders": {
-			ShardingColumn: "user_id",
-			ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-				if uid, ok := value.(int64); ok {
-					return fmt.Sprintf("_%02d", uid%4), nil
-				}
-				return "", errors.New("invalid user_id")
-			},
-			PrimaryKeyGenerate: func(tableIdx int64) int64 {
-				return node.Generate().Int64()
-			},
+	middleware := sharding.Register(sharding.Config{
+		ShardingKey: "user_id",
+		ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
+			if uid, ok := value.(int64); ok {
+				return fmt.Sprintf("_%02d", uid%64), nil
+			}
+			return "", errors.New("invalid user_id")
 		},
-	})
-	db.Use(&middleware)
+		PrimaryKeyGenerate: func(tableIdx int64) int64 {
+			return node.Generate().Int64()
+		},
+	}, "orders")
+	db.Use(middleware)
 
 	// this record will insert to orders_02
 	err = db.Create(&Order{UserID: 2}).Error
@@ -76,6 +74,10 @@ func main() {
 	if err != nil {
 		fmt.Println(err)
 	}
+	fmt.Printf("%#v\n", orders)
+
+	// Raw SQL also supported
+	db.Raw("SELECT * FROM orders WHERE user_id = ?", int64(3)).Scan(&orders)
 	fmt.Printf("%#v\n", orders)
 
 	// this will throw ErrMissingShardingKey error
