@@ -54,16 +54,16 @@ end
 
 
 subgraph database [Database]
-  posts_other[("orders_0, orders_1 ... orders_3")]
-  posts_4[(orders_4)]
-  posts_last[("orders_5 ... orders_15")]
+  orders_other[("orders_0, orders_1 ... orders_3")]
+  orders_4[(orders_4)]
+  orders_last[("orders_5 ... orders_15")]
   other_tables[(Other non-sharding tables<br>users, stocks, topics ...)]
 
   new_sql-->| Sharding Query | orders_4
   check_table_1-.->| None sharding Query |other_tables
 end
 
-posts_4-->result
+orders_4-->result
 other_tables-.->result
 result[/Query results\]
 ```
