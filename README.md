@@ -68,16 +68,10 @@ Use the db session as usual. Just note that the query should have the sharding f
 
 ```go
 // this record will insert to orders_02
-err = db.Create(&Order{UserID: 2}).Error
-if err != nil {
-	fmt.Println(err)
-}
+db.Create(&Order{UserID: 2})
 
 // this record will insert to orders_03
-err = db.Exec("INSERT INTO orders(user_id) VALUES(?)", int64(3)).Error
-if err != nil {
-	fmt.Println(err)
-}
+db.Exec("INSERT INTO orders(user_id) VALUES(?)", int64(3))
 
 // this will throw ErrMissingShardingKey error
 err = db.Exec("INSERT INTO orders(product_id) VALUES(1)").Error
@@ -85,10 +79,7 @@ fmt.Println(err)
 
 // this will redirect query to orders_02
 var orders []Order
-err = db.Model(&Order{}).Where("user_id", int64(2)).Find(&orders).Error
-if err != nil {
-	fmt.Println(err)
-}
+db.Model(&Order{}).Where("user_id", int64(2)).Find(&orders)
 fmt.Printf("%#v\n", orders)
 
 // this will throw ErrMissingShardingKey error
@@ -96,8 +87,7 @@ err = db.Model(&Order{}).Where("product_id", "1").Find(&orders).Error
 fmt.Println(err)
 
 // Update and Delete are similar to create and query
-err = db.Exec("UPDATE orders SET product_id = ? WHERE user_id = ?", 2, int64(3)).Error
-fmt.Println(err) // nil
+db.Exec("UPDATE orders SET product_id = ? WHERE user_id = ?", 2, int64(3))
 err = db.Exec("DELETE FROM orders WHERE product_id = 3").Error
 fmt.Println(err) // ErrMissingShardingKey
 ```
