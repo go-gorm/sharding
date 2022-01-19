@@ -95,13 +95,15 @@ When you sharding tables, you need consider how the primary key generate.
 
 Recommend options:
 
-- [Built in keygen](https://gorm.io/sharding /tree/main/keygen)
+- [Built in keygen](https://github.com/go-gorm/sharding/tree/main/keygen)
 - [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
 - [UUID](https://github.com/google/uuid)
 - [Snowflake](https://github.com/bwmarrin/snowflake)
 
 ## License
 
-Original fork from: [Longbridge](https://github.com/longbridgeapp/gorm-sharding)
+MIT license.
 
-This project under MIT license.
+Original fork from [Longbridge](https://github.com/longbridgeapp/gorm-sharding).
+
+
