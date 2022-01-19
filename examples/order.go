@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/bwmarrin/snowflake"
-	sharding "github.com/longbridgeapp/gorm-sharding"
+	sharding "gorm.io/sharding "
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )

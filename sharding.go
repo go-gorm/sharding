@@ -58,7 +58,7 @@ type Resolver struct {
 	// PrimaryKeyGenerate specifies a function to generate the primary key.
 	// Used only when insert and the record does not contains an id field.
 	// We recommend you use the
-	// [keygen](https://github.com/longbridgeapp/gorm-sharding/tree/main/keygen) component,
+	// [keygen](https://gorm.io/sharding /tree/main/keygen) component,
 	// it is a distributed primary key generator.
 	// When use auto-increment like generator, the tableIdx argument could ignored.
 	//

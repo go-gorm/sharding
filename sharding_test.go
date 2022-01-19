@@ -7,10 +7,10 @@ import (
 	"testing"
 
 	"github.com/longbridgeapp/assert"
-	"github.com/longbridgeapp/gorm-sharding/keygen"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/hints"
+	"gorm.io/sharding/keygen"
 )
 
 type Order struct {

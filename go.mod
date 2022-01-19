@@ -1,4 +1,4 @@
-module github.com/longbridgeapp/gorm-sharding
+module gorm.io/sharding
 
 go 1.17
 

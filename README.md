@@ -1,7 +1,7 @@
 # Gorm Sharding
 
-[![Go](https://github.com/longbridgeapp/gorm-sharding/actions/workflows/go.yml/badge.svg)](https://github.com/longbridgeapp/gorm-sharding/actions/workflows/go.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/longbridgeapp/gorm-sharding.svg)](https://pkg.go.dev/github.com/longbridgeapp/gorm-sharding)
+[![Go](https://gorm.io/sharding /actions/workflows/go.yml/badge.svg)](https://gorm.io/sharding /actions/workflows/go.yml)
+[![Go Reference](https://pkg.go.dev/badge/gorm.io/sharding .svg)](https://pkg.go.dev/gorm.io/sharding)
 
 [Gorm](https://github.com/go-gorm/gorm) Sharding plugin using SQL parser and replace for splits large tables into smaller ones, redirects Query into sharding tables. Give you a high performance database access.
 
@@ -25,7 +25,7 @@ This graph show up how Gorm Sharding works.
 ## Install
 
 ```bash
-go get -u github.com/longbridgeapp/gorm-sharding
+go get -u gorm.io/sharding
 ```
 
 ## Usage
@@ -94,14 +94,12 @@ The full example is [here](./examples/order.go).
 
 When you sharding tables, you need consider how the primary key generate.
 
-
 Recommend options:
 
-- [Built in keygen](https://github.com/longbridgeapp/gorm-sharding/tree/main/keygen)
+- [Built in keygen](https://gorm.io/sharding /tree/main/keygen)
 - [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
 - [UUID](https://github.com/google/uuid)
 - [Snowflake](https://github.com/bwmarrin/snowflake)
-
 
 ## License
 
