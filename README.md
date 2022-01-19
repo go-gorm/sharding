@@ -3,11 +3,11 @@
 [![Go](https://github.com/longbridgeapp/gorm-sharding/actions/workflows/go.yml/badge.svg)](https://github.com/longbridgeapp/gorm-sharding/actions/workflows/go.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/longbridgeapp/gorm-sharding.svg)](https://pkg.go.dev/github.com/longbridgeapp/gorm-sharding)
 
-Gorm Sharding plugin using SQL parser and replace for splits large tables into smaller ones, redirects Query into sharding tables. Give you a high performance database access.
+[Gorm](https://github.com/go-gorm/gorm) Sharding plugin using SQL parser and replace for splits large tables into smaller ones, redirects Query into sharding tables. Give you a high performance database access.
 
 Gorm Sharding 是我们基于 Longbridge 的业务场景以及我们的实践经验构建出来的一个高性能的数据库分表中间件。
 
-它基于 Conn 层做 SQL 拦截、AST 解析、分表路由、自增主键填充，带来的额外开销极小。对开发者友好、透明，使用上与普通 SQL、Gorm 查询无差别，只需要额外注意一下分表键条件。
+它基于 Conn 层做 SQL 拦截、AST 解析、分表路由、自增主键填充，带来的额外开销极小。对开发者友好、透明，使用上与普通 SQL、[Gorm](https://github.com/go-gorm/gorm) 查询无差别，只需要额外注意一下分表键条件。
 
 ## Features
 
@@ -40,7 +40,7 @@ db, err := gorm.Open(postgres.New(postgres.Config{DSN: dsn}))
 Config the sharding middleware, register the tables which you want to shard. See [Godoc](https://pkg.go.dev/github.com/longbridge/gorm-sharding) for config details.
 
 ```go
-middleware := sharding.Register(map[string]sharding.Resolver{
+db.Use(&sharding.Register(map[string]sharding.Resolver{
     "orders": {
         ShardingColumn: "user_id",
         ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
@@ -53,34 +53,32 @@ middleware := sharding.Register(map[string]sharding.Resolver{
             return node.Generate()
         },
     },
-})
+    "notifications": {
+       // ... sharding rule for notifications table
+    },
+}))
 ```
 
-Use the middleware for db session.
+Use the db session as usual. Just note that the query should have the `Sharding Key` when operate sharding tables.
 
 ```go
-db.Use(&middleware)
-```
-
-Use the db session as usual. Just note that the query should have the sharding field when operate sharding tables.
-
-```go
-// this record will insert to orders_02
+// Gorm create example, this will insert to orders_01
 db.Create(&Order{UserID: 2})
+// sql: INSERT INTO orders_2 ...
 
-// this record will insert to orders_03
+// Show have use Raw SQL to insert, this will insert into orders_04
 db.Exec("INSERT INTO orders(user_id) VALUES(?)", int64(3))
 
-// this will throw ErrMissingShardingKey error
-err = db.Exec("INSERT INTO orders(product_id) VALUES(1)").Error
+// This will throw ErrMissingShardingKey error, because there not have sharding key presented.
+db.Create(&Order{Amount: 10, ProductID: 100})
 fmt.Println(err)
 
-// this will redirect query to orders_02
+// Find, this will redirect query to orders_03
 var orders []Order
 db.Model(&Order{}).Where("user_id", int64(2)).Find(&orders)
 fmt.Printf("%#v\n", orders)
 
-// this will throw ErrMissingShardingKey error
+// This will throw ErrMissingShardingKey error, because WHERE conditions not included sharding key
 err = db.Model(&Order{}).Where("product_id", "1").Find(&orders).Error
 fmt.Println(err)
 
@@ -91,6 +89,19 @@ fmt.Println(err) // ErrMissingShardingKey
 ```
 
 The full example is [here](./examples/order.go).
+
+## Primary Key
+
+When you sharding tables, you need consider how the primary key generate.
+
+
+Recommend options:
+
+- [Built in keygen](https://github.com/longbridgeapp/gorm-sharding/tree/main/keygen)
+- [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
+- [UUID](https://github.com/google/uuid)
+- [Snowflake](https://github.com/bwmarrin/snowflake)
+
 
 ## License
 
