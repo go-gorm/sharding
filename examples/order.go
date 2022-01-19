@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	"github.com/bwmarrin/snowflake"
-	sharding "gorm.io/sharding "
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/sharding"
 )
 
 type Order struct {
