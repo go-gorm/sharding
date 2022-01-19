@@ -19,9 +19,17 @@ type Order struct {
 	Product string
 }
 
+func (Order) TableName() string {
+	return "orders"
+}
+
 type Category struct {
 	ID   int64 `gorm:"primarykey"`
 	Name string
+}
+
+func (Category) TableName() string {
+	return "categories"
 }
 
 func databaseURL() string {
@@ -41,35 +49,33 @@ var (
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 
-	sharding = Register(map[string]Resolver{
-		"orders": {
-			EnableFullTable: true,
-			ShardingColumn:  "user_id",
-			ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-				userId := 0
-				switch value := value.(type) {
-				case int:
-					userId = value
-				case int64:
-					userId = int(value)
-				case string:
-					userId, err = strconv.Atoi(value)
-					if err != nil {
-						return "", err
-					}
-				default:
+	middleware = Register(Config{
+		EnableFullTable: true,
+		ShardingKey:     "user_id",
+		ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
+			userId := 0
+			switch value := value.(type) {
+			case int:
+				userId = value
+			case int64:
+				userId = int(value)
+			case string:
+				userId, err = strconv.Atoi(value)
+				if err != nil {
 					return "", err
 				}
-				return fmt.Sprintf("_%02d", userId%4), nil
-			},
-			ShardingAlgorithmByPrimaryKey: func(id int64) (suffix string) {
-				return fmt.Sprintf("_%02d", keygen.TableIdx(id))
-			},
-			PrimaryKeyGenerate: func(tableIdx int64) int64 {
-				return keygen.Next(tableIdx)
-			},
+			default:
+				return "", err
+			}
+			return fmt.Sprintf("_%02d", userId%4), nil
 		},
-	})
+		ShardingAlgorithmByPrimaryKey: func(id int64) (suffix string) {
+			return fmt.Sprintf("_%02d", keygen.TableIdx(id))
+		},
+		PrimaryKeyGenerate: func(tableIdx int64) int64 {
+			return keygen.Next(tableIdx)
+		},
+	}, &Order{})
 )
 
 func init() {
@@ -87,7 +93,7 @@ func init() {
 		)`)
 	}
 
-	db.Use(&sharding)
+	db.Use(middleware)
 }
 
 func dropTables() {
@@ -104,7 +110,7 @@ func TestInsert(t *testing.T) {
 
 func TestFillID(t *testing.T) {
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
-	lastQuery := sharding.LastQuery()
+	lastQuery := middleware.LastQuery()
 	assert.Equal(t, `INSERT INTO "orders_00" ("user_id", "product", "id") VALUES`, lastQuery[0:59])
 }
 
@@ -226,5 +232,5 @@ func TestNoSharding(t *testing.T) {
 
 func assertQueryResult(t *testing.T, query string, tx *gorm.DB) {
 	t.Helper()
-	assert.Equal(t, query, sharding.LastQuery())
+	assert.Equal(t, query, middleware.LastQuery())
 }

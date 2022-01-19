@@ -9,6 +9,7 @@ import (
 
 	"github.com/longbridgeapp/sqlparser"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 var (
@@ -18,21 +19,20 @@ var (
 
 type Sharding struct {
 	*gorm.DB
-	ConnPool  *ConnPool
-	Resolvers map[string]Resolver
-
-	querys sync.Map
+	ConnPool *ConnPool
+	configs  map[string]Config
+	querys   sync.Map
 }
 
-//  Resolver composed by five configurable fields.
-type Resolver struct {
+//  Config specifies the configuration for sharding.
+type Config struct {
 	// EnableFullTable represents whether to enable full table.
 	// When enabled, data will double write to both main table and sharding table.
 	EnableFullTable bool
 
-	// ShardingColumn specifies the table column you want to used for sharding the table rows.
+	// ShardingKey specifies the table column you want to used for sharding the table rows.
 	// For example, for a product order table, you may want to split the rows by `user_id`.
-	ShardingColumn string
+	ShardingKey string
 
 	// ShardingAlgorithm specifies a function to generate the sharding
 	// table's suffix by the column value.
@@ -70,10 +70,25 @@ type Resolver struct {
 	PrimaryKeyGenerate func(tableIdx int64) int64
 }
 
-// Register takes a map, key is the original table name
-// and value is a Resolver.
-func Register(resolvers map[string]Resolver) Sharding {
-	return Sharding{Resolvers: resolvers}
+func Register(config Config, tables ...interface{}) *Sharding {
+	return (&Sharding{}).Register(config, tables...)
+}
+
+func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
+	if s.configs == nil {
+		s.configs = make(map[string]Config)
+	}
+	for _, table := range tables {
+		if t, ok := table.(string); ok {
+			s.configs[t] = config
+		} else if t, ok := table.(schema.Tabler); ok {
+			s.configs[t.TableName()] = config
+		} else {
+			panic("invalid config, use string table name or schema.Tabler")
+		}
+	}
+
+	return s
 }
 
 // Name plugin name for Gorm plugin interface
@@ -101,7 +116,7 @@ func (s *Sharding) Initialize(db *gorm.DB) error {
 func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName string, err error) {
 	ftQuery = query
 	stQuery = query
-	if len(s.Resolvers) == 0 {
+	if len(s.configs) == 0 {
 		return
 	}
 
@@ -144,7 +159,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	}
 
 	tableName = table.Name.Name
-	r, ok := s.Resolvers[tableName]
+	r, ok := s.configs[tableName]
 	if !ok {
 		return
 	}
@@ -153,12 +168,12 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	var id int64
 	var keyFind bool
 	if isInsert {
-		value, id, keyFind, err = s.insertValue(r.ShardingColumn, insertNames, insertValues, args...)
+		value, id, keyFind, err = s.insertValue(r.ShardingKey, insertNames, insertValues, args...)
 		if err != nil {
 			return
 		}
 	} else {
-		value, id, keyFind, err = s.nonInsertValue(r.ShardingColumn, condition, args...)
+		value, id, keyFind, err = s.nonInsertValue(r.ShardingKey, condition, args...)
 		if err != nil {
 			return
 		}

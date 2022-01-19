@@ -44,7 +44,7 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...inte
 	pool.sharding.querys.Store("last_query", stQuery)
 
 	if table != "" {
-		if r, ok := pool.sharding.Resolvers[table]; ok {
+		if r, ok := pool.sharding.configs[table]; ok {
 			if r.EnableFullTable {
 				pool.ConnPool.ExecContext(ctx, ftQuery, args...)
 			}
@@ -64,7 +64,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...int
 	pool.sharding.querys.Store("last_query", stQuery)
 
 	if table != "" {
-		if r, ok := pool.sharding.Resolvers[table]; ok {
+		if r, ok := pool.sharding.configs[table]; ok {
 			if r.EnableFullTable {
 				pool.ConnPool.ExecContext(ctx, ftQuery, args...)
 			}
