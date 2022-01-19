@@ -1,13 +1,12 @@
 # Gorm Sharding
 
-[![Go](https://gorm.io/sharding /actions/workflows/go.yml/badge.svg)](https://gorm.io/sharding /actions/workflows/go.yml)
-[![Go Reference](https://pkg.go.dev/badge/gorm.io/sharding .svg)](https://pkg.go.dev/gorm.io/sharding)
+[![Go](https://github.com/go-gorm/sharding/actions/workflows/go.yml/badge.svg)](https://github.com/go-gorm/sharding/actions/workflows/go.yml)
 
-[Gorm](https://github.com/go-gorm/gorm) Sharding plugin using SQL parser and replace for splits large tables into smaller ones, redirects Query into sharding tables. Give you a high performance database access.
+Gorm Sharding plugin using SQL parser and replace for splits large tables into smaller ones, redirects Query into sharding tables. Give you a high performance database access.
 
-Gorm Sharding 是我们基于 Longbridge 的业务场景以及我们的实践经验构建出来的一个高性能的数据库分表中间件。
+Gorm Sharding 是一个高性能的数据库分表中间件。
 
-它基于 Conn 层做 SQL 拦截、AST 解析、分表路由、自增主键填充，带来的额外开销极小。对开发者友好、透明，使用上与普通 SQL、[Gorm](https://github.com/go-gorm/gorm) 查询无差别，只需要额外注意一下分表键条件。
+它基于 Conn 层做 SQL 拦截、AST 解析、分表路由、自增主键填充，带来的额外开销极小。对开发者友好、透明，使用上与普通 SQL、Gorm 查询无差别，只需要额外注意一下分表键条件。
 
 ## Features
 
@@ -102,5 +101,7 @@ Recommend options:
 - [Snowflake](https://github.com/bwmarrin/snowflake)
 
 ## License
+
+Original fork from: [Longbridge](https://github.com/longbridgeapp/gorm-sharding)
 
 This project under MIT license.
