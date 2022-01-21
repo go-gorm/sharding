@@ -45,7 +45,7 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...inte
 
 	if table != "" {
 		if r, ok := pool.sharding.configs[table]; ok {
-			if r.EnableFullTable {
+			if r.DoubleWrite {
 				pool.ConnPool.ExecContext(ctx, ftQuery, args...)
 			}
 		}
@@ -65,7 +65,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...int
 
 	if table != "" {
 		if r, ok := pool.sharding.configs[table]; ok {
-			if r.EnableFullTable {
+			if r.DoubleWrite {
 				pool.ConnPool.ExecContext(ctx, ftQuery, args...)
 			}
 		}

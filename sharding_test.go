@@ -50,8 +50,8 @@ var (
 	})
 
 	middleware = Register(Config{
-		EnableFullTable: true,
-		ShardingKey:     "user_id",
+		DoubleWrite: true,
+		ShardingKey: "user_id",
 		ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
 			userId := 0
 			switch value := value.(type) {

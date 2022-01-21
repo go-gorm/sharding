@@ -26,9 +26,8 @@ type Sharding struct {
 
 //  Config specifies the configuration for sharding.
 type Config struct {
-	// EnableFullTable represents whether to enable full table.
-	// When enabled, data will double write to both main table and sharding table.
-	EnableFullTable bool
+	// When DoubleWrite enabled, data will double write to both main table and sharding table.
+	DoubleWrite bool
 
 	// ShardingKey specifies the table column you want to used for sharding the table rows.
 	// For example, for a product order table, you may want to split the rows by `user_id`.
