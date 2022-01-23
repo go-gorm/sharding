@@ -21,6 +21,15 @@ select * from orders where id = 76362673717182593 and user_id = 100
 
 The former is commonly used in CRUD codes so we made this improvement.
 
+## Benchmarks
+
+```shell
+cpu: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz
+BenchmarkID-12    	  153584	      7870 ns/op
+```
+
+See [Benchmark tests](./id_test.go).
+
 ## License
 
 This project under MIT license.

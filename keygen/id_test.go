@@ -32,3 +32,10 @@ func TestNextWithLargerCheck(t *testing.T) {
 		lastId = newId
 	}
 }
+
+func BenchmarkID(b *testing.B) {
+	idx := int64(1)
+	for i := 0; i < b.N; i++ {
+		Next(idx)
+	}
+}
