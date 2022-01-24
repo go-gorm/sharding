@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// | 1bit unused | 41bits timestamp | 6bits worker ｜9bits table ｜ 7bits sequence |
+// | 1bit reserved | 41 bits timestamp | 6 bits worker ｜9 bits table ｜ 7 bits sequence |
 const (
 	timeLeft   = uint8(22)
 	workerLeft = uint8(16)

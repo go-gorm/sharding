@@ -21,6 +21,11 @@ select * from orders where id = 76362673717182593 and user_id = 100
 
 The former is commonly used in CRUD codes so we made this improvement.
 
+## Bit struct
+
+| 1 bit reserved | 41 bits timestamp | 6 bits worker | 9 bits table index | 7 bits sequence |
+| -------------- | ----------------- | ------------- | ------------------ | --------------- |
+
 ## Benchmarks
 
 ```shell
