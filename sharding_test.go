@@ -50,7 +50,7 @@ var (
 	shardingConfig = Config{
 		DoubleWrite:         true,
 		ShardingKey:         "user_id",
-		ShardingNumber:      4,
+		NumberOfShards:      4,
 		PrimaryKeyGenerator: PKSnowflake,
 	}
 
@@ -231,7 +231,7 @@ func TestPKPGSequence(t *testing.T) {
 	middleware := Register(shardingConfig, &Order{})
 	db.Use(middleware)
 
-	db.Exec("SELECT setval('gorm_sharding_serial_for_orders', 42)")
+	db.Exec("SELECT setval('" + pgSeqName("orders") + "', 42)")
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
 	expected := `INSERT INTO "orders_0" ("user_id", "product", "id") VALUES ($1, $2, 43) RETURNING "id"`
 	assert.Equal(t, expected, middleware.LastQuery())

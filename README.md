@@ -41,12 +41,12 @@ Config the sharding middleware, register the tables which you want to shard. See
 ```go
 db.Use(sharding.Register(sharding.Config{
     ShardingKey:         "user_id",
-    ShardingNumber:      64,
-    PrimaryKeyGenerator: PKSnowflake,
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
 }, "orders").Register(sharding.Config{
     ShardingKey:         "user_id",
-    ShardingNumber:      256,
-    PrimaryKeyGenerator: PKSnowflake,
+    NumberOfShards:      256,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
     // This case for show up give notifications, audit_logs table use same sharding rule.
 }, Notification{}, AuditLog{}))
 ```

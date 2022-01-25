@@ -42,11 +42,11 @@ type Config struct {
 	// For example, for a product order table, you may want to split the rows by `user_id`.
 	ShardingKey string
 
-	// ShardingNumber specifies how many tables you want to sharding.
-	ShardingNumber uint
+	// NumberOfShards specifies how many tables you want to sharding.
+	NumberOfShards uint
 
-	// TableFormat specifies the sharding table suffix format.
-	TableFormat string
+	// tableFormat specifies the sharding table suffix format.
+	tableFormat string
 
 	// ShardingAlgorithm specifies a function to generate the sharding
 	// table's suffix by the column value.
@@ -104,15 +104,18 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 	}
 
 	for t, c := range s.configs {
+		if c.NumberOfShards > 1024 && c.PrimaryKeyGenerator == PKSnowflake {
+			panic("Snowflake NumberOfShards should less than 1024")
+		}
+
 		if c.PrimaryKeyGenerator == PKSnowflake {
 			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
 				return s.snowflakeNodes[index].Generate().Int64()
 			}
 		} else if c.PrimaryKeyGenerator == PKPGSequence {
-			sname := "gorm_sharding_serial_for_" + t
 			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
 				var id int64
-				err := s.DB.Raw("SELECT nextval('" + sname + "')").Scan(&id).Error
+				err := s.DB.Raw("SELECT nextval('" + pgSeqName(t) + "')").Scan(&id).Error
 				if err != nil {
 					panic(err)
 				}
@@ -127,17 +130,17 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 		}
 
 		if c.ShardingAlgorithm == nil {
-			if c.ShardingNumber == 0 {
-				panic("specify ShardingNumber or ShardingAlgorithm")
+			if c.NumberOfShards == 0 {
+				panic("specify NumberOfShards or ShardingAlgorithm")
 			}
-			if c.ShardingNumber < 10 {
-				c.TableFormat = "_%01d"
-			} else if c.ShardingNumber < 100 {
-				c.TableFormat = "_%02d"
-			} else if c.ShardingNumber < 1000 {
-				c.TableFormat = "_%03d"
-			} else if c.ShardingNumber < 10000 {
-				c.TableFormat = "_%04d"
+			if c.NumberOfShards < 10 {
+				c.tableFormat = "_%01d"
+			} else if c.NumberOfShards < 100 {
+				c.tableFormat = "_%02d"
+			} else if c.NumberOfShards < 1000 {
+				c.tableFormat = "_%03d"
+			} else if c.NumberOfShards < 10000 {
+				c.tableFormat = "_%04d"
 			}
 			c.ShardingAlgorithm = func(value interface{}) (suffix string, err error) {
 				id := 0
@@ -155,14 +158,14 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 					return "", fmt.Errorf("default algorithm only support integer and string column," +
 						"if you use other type, specify you own ShardingAlgorithm")
 				}
-				return fmt.Sprintf(c.TableFormat, id%int(c.ShardingNumber)), nil
+				return fmt.Sprintf(c.tableFormat, id%int(c.NumberOfShards)), nil
 			}
 		}
 
 		if c.ShardingAlgorithmByPrimaryKey == nil {
 			if c.PrimaryKeyGenerator == PKSnowflake {
 				c.ShardingAlgorithmByPrimaryKey = func(id int64) (suffix string) {
-					return fmt.Sprintf(c.TableFormat, snowflake.ParseInt64(id).Node())
+					return fmt.Sprintf(c.tableFormat, snowflake.ParseInt64(id).Node())
 				}
 			}
 		}
@@ -193,8 +196,7 @@ func (s *Sharding) Initialize(db *gorm.DB) error {
 
 	for t, c := range s.configs {
 		if c.PrimaryKeyGenerator == PKPGSequence {
-			sname := "gorm_sharding_serial_for_" + t
-			err := s.DB.Exec("CREATE SEQUENCE IF NOT EXISTS " + sname).Error
+			err := s.DB.Exec("CREATE SEQUENCE IF NOT EXISTS " + pgSeqName(t)).Error
 			if err != nil {
 				return fmt.Errorf("init postgresql sequence error, %w", err)
 			}
@@ -450,4 +452,8 @@ func getBindValue(value interface{}, args []interface{}) (interface{}, error) {
 		return nil, err
 	}
 	return args[pos-1], nil
+}
+
+func pgSeqName(table string) string {
+	return fmt.Sprintf("gorm_sharding_%s_id_seq", table)
 }
