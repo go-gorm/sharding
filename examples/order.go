@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 
 	"gorm.io/driver/postgres"
@@ -33,13 +32,8 @@ func main() {
 	}
 
 	middleware := sharding.Register(sharding.Config{
-		ShardingKey: "user_id",
-		ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-			if uid, ok := value.(int64); ok {
-				return fmt.Sprintf("_%02d", uid%64), nil
-			}
-			return "", errors.New("invalid user_id")
-		},
+		ShardingKey:         "user_id",
+		ShardingNumber:      64,
 		PrimaryKeyGenerator: sharding.PKSnowflake,
 	}, "orders")
 	db.Use(middleware)

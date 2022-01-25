@@ -1,9 +1,7 @@
 package sharding
 
 import (
-	"fmt"
 	"os"
-	"strconv"
 	"testing"
 
 	"github.com/bwmarrin/snowflake"
@@ -50,34 +48,14 @@ var (
 	})
 
 	shardingConfig = Config{
-		DoubleWrite: true,
-		ShardingKey: "user_id",
-		ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-			userId := 0
-			switch value := value.(type) {
-			case int:
-				userId = value
-			case int64:
-				userId = int(value)
-			case string:
-				userId, err = strconv.Atoi(value)
-				if err != nil {
-					return "", err
-				}
-			default:
-				return "", err
-			}
-			return fmt.Sprintf("_%02d", userId%4), nil
-		},
-		ShardingAlgorithmByPrimaryKey: func(id int64) (suffix string) {
-			return fmt.Sprintf("_%02d", snowflake.ParseInt64(id).Node())
-		},
+		DoubleWrite:         true,
+		ShardingKey:         "user_id",
+		ShardingNumber:      4,
 		PrimaryKeyGenerator: PKSnowflake,
 	}
 
 	middleware = Register(shardingConfig, &Order{})
-
-	node, _ = snowflake.NewNode(1)
+	node, _    = snowflake.NewNode(1)
 )
 
 func init() {
@@ -86,7 +64,7 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	stables := []string{"orders_00", "orders_01", "orders_02", "orders_03"}
+	stables := []string{"orders_0", "orders_1", "orders_2", "orders_3"}
 	for _, table := range stables {
 		db.Exec(`CREATE TABLE ` + table + ` (
 			id BIGSERIAL PRIMARY KEY,
@@ -99,7 +77,7 @@ func init() {
 }
 
 func dropTables() {
-	tables := []string{"orders", "orders_00", "orders_01", "orders_02", "orders_03", "categories"}
+	tables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
 	for _, table := range tables {
 		db.Exec("DROP TABLE IF EXISTS " + table)
 	}
@@ -107,58 +85,58 @@ func dropTables() {
 
 func TestInsert(t *testing.T) {
 	tx := db.Create(&Order{ID: 100, UserID: 100, Product: "iPhone"})
-	assertQueryResult(t, `INSERT INTO "orders_00" ("user_id", "product", "id") VALUES ($1, $2, $3) RETURNING "id"`, tx)
+	assertQueryResult(t, `INSERT INTO "orders_0" ("user_id", "product", "id") VALUES ($1, $2, $3) RETURNING "id"`, tx)
 }
 
 func TestFillID(t *testing.T) {
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
 	lastQuery := middleware.LastQuery()
-	assert.Equal(t, `INSERT INTO "orders_00" ("user_id", "product", "id") VALUES`, lastQuery[0:59])
+	assert.Equal(t, `INSERT INTO "orders_0" ("user_id", "product", "id") VALUES`, lastQuery[0:58])
 }
 
 func TestSelect1(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id", 101).Where("id", node.Generate().Int64()).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "user_id" = $1 AND "id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "user_id" = $1 AND "id" = $2`, tx)
 }
 
 func TestSelect2(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Where("user_id", 101).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "id" = $1 AND "user_id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "id" = $1 AND "user_id" = $2`, tx)
 }
 
 func TestSelect3(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Where("user_id = 101").Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "id" = $1 AND "user_id" = 101`, tx)
+	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "id" = $1 AND "user_id" = 101`, tx)
 }
 
 func TestSelect4(t *testing.T) {
 	tx := db.Model(&Order{}).Where("product", "iPad").Where("user_id", 100).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_00" WHERE "product" = $1 AND "user_id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM "orders_0" WHERE "product" = $1 AND "user_id" = $2`, tx)
 }
 
 func TestSelect5(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id = 101").Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "user_id" = 101`, tx)
+	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "user_id" = 101`, tx)
 }
 
 func TestSelect6(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "id" = $1`, tx)
+	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "id" = $1`, tx)
 }
 
 func TestSelect7(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id", 101).Where("id > ?", node.Generate().Int64()).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "user_id" = $1 AND "id" > $2`, tx)
+	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "user_id" = $1 AND "id" > $2`, tx)
 }
 
 func TestSelect8(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id > ?", node.Generate().Int64()).Where("user_id", 101).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "id" > $1 AND "user_id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "id" > $1 AND "user_id" = $2`, tx)
 }
 
 func TestSelect9(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id = 101").First(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "user_id" = 101 ORDER BY "orders_01"."id" LIMIT 1`, tx)
+	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "user_id" = 101 ORDER BY "orders_1"."id" LIMIT 1`, tx)
 }
 
 func TestSelect10(t *testing.T) {
@@ -183,12 +161,12 @@ func TestSelect13(t *testing.T) {
 
 func TestUpdate(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id = ?", 100).Update("product", "new title")
-	assertQueryResult(t, `UPDATE "orders_00" SET "product" = $1 WHERE "user_id" = $2`, tx)
+	assertQueryResult(t, `UPDATE "orders_0" SET "product" = $1 WHERE "user_id" = $2`, tx)
 }
 
 func TestDelete(t *testing.T) {
 	tx := db.Where("user_id = ?", 100).Delete(&Order{})
-	assertQueryResult(t, `DELETE FROM "orders_00" WHERE "user_id" = $1`, tx)
+	assertQueryResult(t, `DELETE FROM "orders_0" WHERE "user_id" = $1`, tx)
 }
 
 func TestInsertMissingShardingKey(t *testing.T) {
@@ -241,7 +219,7 @@ func TestPKSnowflake(t *testing.T) {
 	db.Use(middleware)
 
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
-	expected := `INSERT INTO "orders_00" ("user_id", "product", "id") VALUES ($1, $2, 14858`
+	expected := `INSERT INTO "orders_0" ("user_id", "product", "id") VALUES ($1, $2, 148`
 	assert.Equal(t, expected, middleware.LastQuery()[0:len(expected)])
 }
 
@@ -255,7 +233,7 @@ func TestPKPGSequence(t *testing.T) {
 
 	db.Exec("SELECT setval('gorm_sharding_serial_for_orders', 42)")
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
-	expected := `INSERT INTO "orders_00" ("user_id", "product", "id") VALUES ($1, $2, 43) RETURNING "id"`
+	expected := `INSERT INTO "orders_0" ("user_id", "product", "id") VALUES ($1, $2, 43) RETURNING "id"`
 	assert.Equal(t, expected, middleware.LastQuery())
 }
 

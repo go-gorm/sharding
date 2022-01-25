@@ -3,6 +3,7 @@ package sharding
 import (
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,12 @@ type Config struct {
 	// ShardingKey specifies the table column you want to used for sharding the table rows.
 	// For example, for a product order table, you may want to split the rows by `user_id`.
 	ShardingKey string
+
+	// ShardingNumber specifies how many tables you want to sharding.
+	ShardingNumber uint
+
+	// TableFormat specifies the sharding table suffix format.
+	TableFormat string
 
 	// ShardingAlgorithm specifies a function to generate the sharding
 	// table's suffix by the column value.
@@ -117,6 +124,47 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 			}
 		} else {
 			panic("PrimaryKeyGenerator can only be one of PKSnowflake, PKPGSequence and PKCustom")
+		}
+
+		if c.ShardingAlgorithm == nil {
+			if c.ShardingNumber == 0 {
+				panic("specify ShardingNumber or ShardingAlgorithm")
+			}
+			if c.ShardingNumber < 10 {
+				c.TableFormat = "_%01d"
+			} else if c.ShardingNumber < 100 {
+				c.TableFormat = "_%02d"
+			} else if c.ShardingNumber < 1000 {
+				c.TableFormat = "_%03d"
+			} else if c.ShardingNumber < 10000 {
+				c.TableFormat = "_%04d"
+			}
+			c.ShardingAlgorithm = func(value interface{}) (suffix string, err error) {
+				id := 0
+				switch value := value.(type) {
+				case int:
+					id = value
+				case int64:
+					id = int(value)
+				case string:
+					id, err = strconv.Atoi(value)
+					if err != nil {
+						id = int(crc32.ChecksumIEEE([]byte(value)))
+					}
+				default:
+					return "", fmt.Errorf("default algorithm only support integer and string column," +
+						"if you use other type, specify you own ShardingAlgorithm")
+				}
+				return fmt.Sprintf(c.TableFormat, id%int(c.ShardingNumber)), nil
+			}
+		}
+
+		if c.ShardingAlgorithmByPrimaryKey == nil {
+			if c.PrimaryKeyGenerator == PKSnowflake {
+				c.ShardingAlgorithmByPrimaryKey = func(id int64) (suffix string) {
+					return fmt.Sprintf(c.TableFormat, snowflake.ParseInt64(id).Node())
+				}
+			}
 		}
 		s.configs[t] = c
 	}

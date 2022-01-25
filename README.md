@@ -40,25 +40,13 @@ Config the sharding middleware, register the tables which you want to shard. See
 
 ```go
 db.Use(sharding.Register(sharding.Config{
-    ShardingKey: "user_id",
-    ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-        if user_id, ok := value.(int64); ok {
-            return fmt.Sprintf("_%02d", user_id%64), nil
-        }
-        return "", errors.New("invalid user_id")
-    },
-    PrimaryKeyGenerator: sharding.PKSnowflake,
+    ShardingKey:         "user_id",
+    ShardingNumber:      64,
+    PrimaryKeyGenerator: PKSnowflake,
 }, "orders").Register(sharding.Config{
-    ShardingKey: "user_id",
-    ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-        if user_id, ok := value.(int64); ok {
-            return fmt.Sprintf("_%02d", user_id%256), nil
-        }
-        return "", errors.New("invalid user_id")
-    },
-    PrimaryKeyGenerate: func(tableIdx int64) int64 {
-        return snowflake_node.Generate().Int64()
-    }
+    ShardingKey:         "user_id",
+    ShardingNumber:      256,
+    PrimaryKeyGenerator: PKSnowflake,
     // This case for show up give notifications, audit_logs table use same sharding rule.
 }, Notification{}, AuditLog{}))
 ```
