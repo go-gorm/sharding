@@ -47,10 +47,7 @@ db.Use(sharding.Register(sharding.Config{
         }
         return "", errors.New("invalid user_id")
     },
-    PrimaryKeyGenerate: func(tableIdx int64) int64 {
-        // use LongKey for generate a sequence primary key with table index
-        return longkey.Next(tableIdx)
-    }
+    PrimaryKeyGenerator: sharding.PKLongKey,
 }, "orders").Register(sharding.Config{
     ShardingKey: "user_id",
     ShardingAlgorithm: func(value interface{}) (suffix string, err error) {

@@ -49,7 +49,7 @@ var (
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 
-	middleware = Register(Config{
+	shardingConfig = Config{
 		DoubleWrite: true,
 		ShardingKey: "user_id",
 		ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
@@ -72,10 +72,10 @@ var (
 		ShardingAlgorithmByPrimaryKey: func(id int64) (suffix string) {
 			return fmt.Sprintf("_%02d", longkey.TableIdx(id))
 		},
-		PrimaryKeyGenerate: func(tableIdx int64) int64 {
-			return longkey.Next(tableIdx)
-		},
-	}, &Order{})
+		PrimaryKeyGenerator: PKLongKey,
+	}
+
+	middleware = Register(shardingConfig, &Order{})
 )
 
 func init() {
@@ -228,6 +228,33 @@ func TestNoSharding(t *testing.T) {
 	categories := []Category{}
 	tx := db.Model(&Category{}).Where("id = ?", 1).Find(&categories)
 	assertQueryResult(t, `SELECT * FROM "categories" WHERE id = $1`, tx)
+}
+
+func TestPKSnowflake(t *testing.T) {
+	db, _ := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	shardingConfig.PrimaryKeyGenerator = PKSnowflake
+	middleware := Register(shardingConfig, &Order{})
+	db.Use(middleware)
+
+	db.Create(&Order{UserID: 100, Product: "iPhone"})
+	expected := `INSERT INTO "orders_00" ("user_id", "product", "id") VALUES ($1, $2, 14858`
+	assert.Equal(t, expected, middleware.LastQuery()[0:len(expected)])
+}
+
+func TestPKPGSequence(t *testing.T) {
+	db, _ := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	shardingConfig.PrimaryKeyGenerator = PKPGSequence
+	middleware := Register(shardingConfig, &Order{})
+	db.Use(middleware)
+
+	db.Exec("SELECT setval('gorm_sharding_serial_for_orders', 42)")
+	db.Create(&Order{UserID: 100, Product: "iPhone"})
+	expected := `INSERT INTO "orders_00" ("user_id", "product", "id") VALUES ($1, $2, 43) RETURNING "id"`
+	assert.Equal(t, expected, middleware.LastQuery())
 }
 
 func assertQueryResult(t *testing.T, query string, tx *gorm.DB) {

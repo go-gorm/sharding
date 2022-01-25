@@ -7,9 +7,18 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bwmarrin/snowflake"
+	"github.com/longbridgeapp/longkey"
 	"github.com/longbridgeapp/sqlparser"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
+)
+
+const (
+	PKLongKey    = iota // Use LongKey primary key generator
+	PKSnowflake         // Use Snowflake primary key generator
+	PKPGSequence        // Use PostgreSQL sequence primary key generator
+	PKCustom            // Use custom primary key generator
 )
 
 var (
@@ -54,19 +63,20 @@ type Config struct {
 	//	}
 	ShardingAlgorithmByPrimaryKey func(id int64) (suffix string)
 
-	// PrimaryKeyGenerate specifies a function to generate the primary key.
+	// PrimaryKeyGenerator specifies the primary key generate algorithm.
 	// Used only when insert and the record does not contains an id field.
-	// We recommend you use the
-	// [LongKey](https://github.com/longbridgeapp/longkey) component,
-	// it is a distributed primary key generator.
+	// Options are PKLongKey, PKSnowflake, PKPGSequence and PKCustom.
+	// When use PKCustom, you should also specify PrimaryKeyGeneratorFn.
+	PrimaryKeyGenerator int
+
+	// PrimaryKeyGeneratorFn specifies a function to generate the primary key.
 	// When use auto-increment like generator, the tableIdx argument could ignored.
-	//
 	// For example, this function use the LongKey library to generate the primary key.
 	//
 	// 	func(tableIdx int64) int64 {
 	//		return longkey.Next(tableIdx)
 	//	}
-	PrimaryKeyGenerate func(tableIdx int64) int64
+	PrimaryKeyGeneratorFn func(tableIdx int64) int64
 }
 
 func Register(config Config, tables ...interface{}) *Sharding {
@@ -85,6 +95,39 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 		} else {
 			panic("invalid config, use string table name or schema.Tabler")
 		}
+	}
+
+	for t, c := range s.configs {
+		if c.PrimaryKeyGenerator == PKLongKey {
+			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
+				return longkey.Next(index)
+			}
+		} else if c.PrimaryKeyGenerator == PKSnowflake {
+			node, err := snowflake.NewNode(1)
+			if err != nil {
+				panic(err)
+			}
+			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
+				return node.Generate().Int64()
+			}
+		} else if c.PrimaryKeyGenerator == PKPGSequence {
+			sname := "gorm_sharding_serial_for_" + t
+			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
+				var id int64
+				err := s.DB.Raw("SELECT nextval('" + sname + "')").Scan(&id).Error
+				if err != nil {
+					panic(err)
+				}
+				return id
+			}
+		} else if c.PrimaryKeyGenerator == PKCustom {
+			if c.PrimaryKeyGeneratorFn == nil {
+				panic("PrimaryKeyGeneratorFn not configured")
+			}
+		} else {
+			panic("PrimaryKeyGenerator can only be one of PKLongKey, PKSnowflake, PKPGSequence and PKCustom")
+		}
+		s.configs[t] = c
 	}
 
 	return s
@@ -108,6 +151,15 @@ func (s *Sharding) LastQuery() string {
 func (s *Sharding) Initialize(db *gorm.DB) error {
 	s.DB = db
 	s.registerConnPool(db)
+
+	for t := range s.configs {
+		sname := "gorm_sharding_serial_for_" + t
+		err := s.DB.Exec("CREATE SEQUENCE IF NOT EXISTS " + sname).Error
+		if err != nil {
+			return fmt.Errorf("init postgresql sequence error, %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -208,7 +260,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			if err != nil {
 				return ftQuery, stQuery, tableName, err
 			}
-			id := r.PrimaryKeyGenerate(int64(tblIdx))
+			id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
 			insertNames = append(insertNames, &sqlparser.Ident{Name: "id"})
 			insertValues = append(insertValues, &sqlparser.NumberLit{Value: strconv.FormatInt(id, 10)})
 		}
