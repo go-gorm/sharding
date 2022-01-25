@@ -13,7 +13,7 @@ Gorm Sharding 是一个高性能的数据库分表中间件。
 - Non-intrusive design. Load the plugin, specify the config, and all done.
 - Lighting-fast. No network based middlewares, as fast as Go.
 - Multiple database support. PostgreSQL tested, MySQL and SQLite is coming.
-- Allows you custom the Primary Key generator ([Longkey](https://github.com/longbridgeapp/longkey), Sequence, Snowflake ...).
+- Integrated primary key generator (Snowflake, PostgreSQL Sequence, Custom, ...).
 
 ## Sharding process
 
@@ -40,28 +40,13 @@ Config the sharding middleware, register the tables which you want to shard. See
 
 ```go
 db.Use(sharding.Register(sharding.Config{
-    ShardingKey: "user_id",
-    ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-        if user_id, ok := value.(int64); ok {
-            return fmt.Sprintf("_%02d", user_id%64), nil
-        }
-        return "", errors.New("invalid user_id")
-    },
-    PrimaryKeyGenerate: func(tableIdx int64) int64 {
-        // use LongKey for generate a sequence primary key with table index
-        return longkey.Next(tableIdx)
-    }
+    ShardingKey:         "user_id",
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
 }, "orders").Register(sharding.Config{
-    ShardingKey: "user_id",
-    ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-        if user_id, ok := value.(int64); ok {
-            return fmt.Sprintf("_%02d", user_id%256), nil
-        }
-        return "", errors.New("invalid user_id")
-    },
-    PrimaryKeyGenerate: func(tableIdx int64) int64 {
-        return snowflake_node.Generate().Int64()
-    }
+    ShardingKey:         "user_id",
+    NumberOfShards:      256,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
     // This case for show up give notifications, audit_logs table use same sharding rule.
 }, Notification{}, AuditLog{}))
 ```
@@ -107,9 +92,8 @@ When you sharding tables, you need consider how the primary key generate.
 
 Recommend options:
 
-- [LongKey](https://github.com/longbridgeapp/longkey)
-- [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
 - [Snowflake](https://github.com/bwmarrin/snowflake)
+- [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
 
 ## License
 

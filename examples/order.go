@@ -1,10 +1,8 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 
-	"github.com/bwmarrin/snowflake"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/sharding"
@@ -33,22 +31,10 @@ func main() {
 		)`)
 	}
 
-	node, err := snowflake.NewNode(1)
-	if err != nil {
-		panic(err)
-	}
-
 	middleware := sharding.Register(sharding.Config{
-		ShardingKey: "user_id",
-		ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
-			if uid, ok := value.(int64); ok {
-				return fmt.Sprintf("_%02d", uid%64), nil
-			}
-			return "", errors.New("invalid user_id")
-		},
-		PrimaryKeyGenerate: func(tableIdx int64) int64 {
-			return node.Generate().Int64()
-		},
+		ShardingKey:         "user_id",
+		NumberOfShards:      64,
+		PrimaryKeyGenerator: sharding.PKSnowflake,
 	}, "orders")
 	db.Use(middleware)
 

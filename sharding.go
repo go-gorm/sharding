@@ -3,13 +3,21 @@ package sharding
 import (
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/sqlparser"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
+)
+
+const (
+	PKSnowflake  = iota // Use Snowflake primary key generator
+	PKPGSequence        // Use PostgreSQL sequence primary key generator
+	PKCustom            // Use custom primary key generator
 )
 
 var (
@@ -19,9 +27,10 @@ var (
 
 type Sharding struct {
 	*gorm.DB
-	ConnPool *ConnPool
-	configs  map[string]Config
-	querys   sync.Map
+	ConnPool       *ConnPool
+	configs        map[string]Config
+	querys         sync.Map
+	snowflakeNodes []*snowflake.Node
 }
 
 //  Config specifies the configuration for sharding.
@@ -32,6 +41,12 @@ type Config struct {
 	// ShardingKey specifies the table column you want to used for sharding the table rows.
 	// For example, for a product order table, you may want to split the rows by `user_id`.
 	ShardingKey string
+
+	// NumberOfShards specifies how many tables you want to sharding.
+	NumberOfShards uint
+
+	// tableFormat specifies the sharding table suffix format.
+	tableFormat string
 
 	// ShardingAlgorithm specifies a function to generate the sharding
 	// table's suffix by the column value.
@@ -47,26 +62,27 @@ type Config struct {
 
 	// ShardingAlgorithmByPrimaryKey specifies a function to generate the sharding
 	// table's suffix by the primary key. Used when no sharding key specified.
-	// For example, this function use the LongKey library to generate the suffix.
+	// For example, this function use the Snowflake library to generate the suffix.
 	//
 	// 	func(id int64) (suffix string) {
-	//		return fmt.Sprintf("_%02d", longkey.TableIdx(id))
+	//		return fmt.Sprintf("_%02d", snowflake.ParseInt64(id).Node())
 	//	}
 	ShardingAlgorithmByPrimaryKey func(id int64) (suffix string)
 
-	// PrimaryKeyGenerate specifies a function to generate the primary key.
+	// PrimaryKeyGenerator specifies the primary key generate algorithm.
 	// Used only when insert and the record does not contains an id field.
-	// We recommend you use the
-	// [LongKey](https://github.com/longbridgeapp/longkey) component,
-	// it is a distributed primary key generator.
+	// Options are PKSnowflake, PKPGSequence and PKCustom.
+	// When use PKCustom, you should also specify PrimaryKeyGeneratorFn.
+	PrimaryKeyGenerator int
+
+	// PrimaryKeyGeneratorFn specifies a function to generate the primary key.
 	// When use auto-increment like generator, the tableIdx argument could ignored.
-	//
-	// For example, this function use the LongKey library to generate the primary key.
+	// For example, this function use the Snowflake library to generate the primary key.
 	//
 	// 	func(tableIdx int64) int64 {
-	//		return longkey.Next(tableIdx)
+	//		return nodes[tableIdx].Generate().Int64()
 	//	}
-	PrimaryKeyGenerate func(tableIdx int64) int64
+	PrimaryKeyGeneratorFn func(tableIdx int64) int64
 }
 
 func Register(config Config, tables ...interface{}) *Sharding {
@@ -85,6 +101,75 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 		} else {
 			panic("invalid config, use string table name or schema.Tabler")
 		}
+	}
+
+	for t, c := range s.configs {
+		if c.NumberOfShards > 1024 && c.PrimaryKeyGenerator == PKSnowflake {
+			panic("Snowflake NumberOfShards should less than 1024")
+		}
+
+		if c.PrimaryKeyGenerator == PKSnowflake {
+			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
+				return s.snowflakeNodes[index].Generate().Int64()
+			}
+		} else if c.PrimaryKeyGenerator == PKPGSequence {
+			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
+				var id int64
+				err := s.DB.Raw("SELECT nextval('" + pgSeqName(t) + "')").Scan(&id).Error
+				if err != nil {
+					panic(err)
+				}
+				return id
+			}
+		} else if c.PrimaryKeyGenerator == PKCustom {
+			if c.PrimaryKeyGeneratorFn == nil {
+				panic("PrimaryKeyGeneratorFn not configured")
+			}
+		} else {
+			panic("PrimaryKeyGenerator can only be one of PKSnowflake, PKPGSequence and PKCustom")
+		}
+
+		if c.ShardingAlgorithm == nil {
+			if c.NumberOfShards == 0 {
+				panic("specify NumberOfShards or ShardingAlgorithm")
+			}
+			if c.NumberOfShards < 10 {
+				c.tableFormat = "_%01d"
+			} else if c.NumberOfShards < 100 {
+				c.tableFormat = "_%02d"
+			} else if c.NumberOfShards < 1000 {
+				c.tableFormat = "_%03d"
+			} else if c.NumberOfShards < 10000 {
+				c.tableFormat = "_%04d"
+			}
+			c.ShardingAlgorithm = func(value interface{}) (suffix string, err error) {
+				id := 0
+				switch value := value.(type) {
+				case int:
+					id = value
+				case int64:
+					id = int(value)
+				case string:
+					id, err = strconv.Atoi(value)
+					if err != nil {
+						id = int(crc32.ChecksumIEEE([]byte(value)))
+					}
+				default:
+					return "", fmt.Errorf("default algorithm only support integer and string column," +
+						"if you use other type, specify you own ShardingAlgorithm")
+				}
+				return fmt.Sprintf(c.tableFormat, id%int(c.NumberOfShards)), nil
+			}
+		}
+
+		if c.ShardingAlgorithmByPrimaryKey == nil {
+			if c.PrimaryKeyGenerator == PKSnowflake {
+				c.ShardingAlgorithmByPrimaryKey = func(id int64) (suffix string) {
+					return fmt.Sprintf(c.tableFormat, snowflake.ParseInt64(id).Node())
+				}
+			}
+		}
+		s.configs[t] = c
 	}
 
 	return s
@@ -108,6 +193,25 @@ func (s *Sharding) LastQuery() string {
 func (s *Sharding) Initialize(db *gorm.DB) error {
 	s.DB = db
 	s.registerConnPool(db)
+
+	for t, c := range s.configs {
+		if c.PrimaryKeyGenerator == PKPGSequence {
+			err := s.DB.Exec("CREATE SEQUENCE IF NOT EXISTS " + pgSeqName(t)).Error
+			if err != nil {
+				return fmt.Errorf("init postgresql sequence error, %w", err)
+			}
+		}
+	}
+
+	s.snowflakeNodes = make([]*snowflake.Node, 1024)
+	for i := int64(0); i < 1024; i++ {
+		n, err := snowflake.NewNode(i)
+		if err != nil {
+			return fmt.Errorf("init snowflake node error, %w", err)
+		}
+		s.snowflakeNodes[i] = n
+	}
+
 	return nil
 }
 
@@ -208,7 +312,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			if err != nil {
 				return ftQuery, stQuery, tableName, err
 			}
-			id := r.PrimaryKeyGenerate(int64(tblIdx))
+			id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
 			insertNames = append(insertNames, &sqlparser.Ident{Name: "id"})
 			insertValues = append(insertValues, &sqlparser.NumberLit{Value: strconv.FormatInt(id, 10)})
 		}
@@ -348,4 +452,8 @@ func getBindValue(value interface{}, args []interface{}) (interface{}, error) {
 		return nil, err
 	}
 	return args[pos-1], nil
+}
+
+func pgSeqName(table string) string {
+	return fmt.Sprintf("gorm_sharding_%s_id_seq", table)
 }
