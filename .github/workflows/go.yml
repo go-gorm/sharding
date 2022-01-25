@@ -4,6 +4,14 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dialector: postgres
+            version: 13
+          - dialector: mysql
+            version: 5.7
     env:
       DATABASE_URL: postgres://localhost:5432/sharding-test
     steps:
@@ -13,9 +21,10 @@ jobs:
           go-version: 1.17
         id: go
 
-      - uses: ankane/setup-postgres@v1
+      - uses: ankane/setup-${{ matrix.dialector }}@v1
         with:
-          postgres-version: ${{ matrix.postgres }}
+          postgres-version: ${{ matrix.version }}
+          mysql-version: ${{ matrix.version }}
       - run: createdb sharding-test
 
       - name: Check out code into the Go module directory
