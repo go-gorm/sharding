@@ -40,7 +40,7 @@ func main() {
 			}
 			return "", errors.New("invalid user_id")
 		},
-		PrimaryKeyGenerator: sharding.PKLongKey,
+		PrimaryKeyGenerator: sharding.PKSnowflake,
 	}, "orders")
 	db.Use(middleware)
 

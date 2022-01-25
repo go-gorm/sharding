@@ -8,15 +8,13 @@ import (
 	"sync"
 
 	"github.com/bwmarrin/snowflake"
-	"github.com/longbridgeapp/longkey"
 	"github.com/longbridgeapp/sqlparser"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
 
 const (
-	PKLongKey    = iota // Use LongKey primary key generator
-	PKSnowflake         // Use Snowflake primary key generator
+	PKSnowflake  = iota // Use Snowflake primary key generator
 	PKPGSequence        // Use PostgreSQL sequence primary key generator
 	PKCustom            // Use custom primary key generator
 )
@@ -28,9 +26,10 @@ var (
 
 type Sharding struct {
 	*gorm.DB
-	ConnPool *ConnPool
-	configs  map[string]Config
-	querys   sync.Map
+	ConnPool       *ConnPool
+	configs        map[string]Config
+	querys         sync.Map
+	snowflakeNodes []*snowflake.Node
 }
 
 //  Config specifies the configuration for sharding.
@@ -56,25 +55,25 @@ type Config struct {
 
 	// ShardingAlgorithmByPrimaryKey specifies a function to generate the sharding
 	// table's suffix by the primary key. Used when no sharding key specified.
-	// For example, this function use the LongKey library to generate the suffix.
+	// For example, this function use the Snowflake library to generate the suffix.
 	//
 	// 	func(id int64) (suffix string) {
-	//		return fmt.Sprintf("_%02d", longkey.TableIdx(id))
+	//		return fmt.Sprintf("_%02d", snowflake.ParseInt64(id).Node())
 	//	}
 	ShardingAlgorithmByPrimaryKey func(id int64) (suffix string)
 
 	// PrimaryKeyGenerator specifies the primary key generate algorithm.
 	// Used only when insert and the record does not contains an id field.
-	// Options are PKLongKey, PKSnowflake, PKPGSequence and PKCustom.
+	// Options are PKSnowflake, PKPGSequence and PKCustom.
 	// When use PKCustom, you should also specify PrimaryKeyGeneratorFn.
 	PrimaryKeyGenerator int
 
 	// PrimaryKeyGeneratorFn specifies a function to generate the primary key.
 	// When use auto-increment like generator, the tableIdx argument could ignored.
-	// For example, this function use the LongKey library to generate the primary key.
+	// For example, this function use the Snowflake library to generate the primary key.
 	//
 	// 	func(tableIdx int64) int64 {
-	//		return longkey.Next(tableIdx)
+	//		return nodes[tableIdx].Generate().Int64()
 	//	}
 	PrimaryKeyGeneratorFn func(tableIdx int64) int64
 }
@@ -98,17 +97,9 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 	}
 
 	for t, c := range s.configs {
-		if c.PrimaryKeyGenerator == PKLongKey {
+		if c.PrimaryKeyGenerator == PKSnowflake {
 			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
-				return longkey.Next(index)
-			}
-		} else if c.PrimaryKeyGenerator == PKSnowflake {
-			node, err := snowflake.NewNode(1)
-			if err != nil {
-				panic(err)
-			}
-			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
-				return node.Generate().Int64()
+				return s.snowflakeNodes[index].Generate().Int64()
 			}
 		} else if c.PrimaryKeyGenerator == PKPGSequence {
 			sname := "gorm_sharding_serial_for_" + t
@@ -125,7 +116,7 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 				panic("PrimaryKeyGeneratorFn not configured")
 			}
 		} else {
-			panic("PrimaryKeyGenerator can only be one of PKLongKey, PKSnowflake, PKPGSequence and PKCustom")
+			panic("PrimaryKeyGenerator can only be one of PKSnowflake, PKPGSequence and PKCustom")
 		}
 		s.configs[t] = c
 	}
@@ -152,12 +143,23 @@ func (s *Sharding) Initialize(db *gorm.DB) error {
 	s.DB = db
 	s.registerConnPool(db)
 
-	for t := range s.configs {
-		sname := "gorm_sharding_serial_for_" + t
-		err := s.DB.Exec("CREATE SEQUENCE IF NOT EXISTS " + sname).Error
-		if err != nil {
-			return fmt.Errorf("init postgresql sequence error, %w", err)
+	for t, c := range s.configs {
+		if c.PrimaryKeyGenerator == PKPGSequence {
+			sname := "gorm_sharding_serial_for_" + t
+			err := s.DB.Exec("CREATE SEQUENCE IF NOT EXISTS " + sname).Error
+			if err != nil {
+				return fmt.Errorf("init postgresql sequence error, %w", err)
+			}
 		}
+	}
+
+	s.snowflakeNodes = make([]*snowflake.Node, 1024)
+	for i := int64(0); i < 1024; i++ {
+		n, err := snowflake.NewNode(i)
+		if err != nil {
+			return fmt.Errorf("init snowflake node error, %w", err)
+		}
+		s.snowflakeNodes[i] = n
 	}
 
 	return nil

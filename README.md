@@ -13,7 +13,7 @@ Gorm Sharding 是一个高性能的数据库分表中间件。
 - Non-intrusive design. Load the plugin, specify the config, and all done.
 - Lighting-fast. No network based middlewares, as fast as Go.
 - Multiple database support. PostgreSQL tested, MySQL and SQLite is coming.
-- Allows you custom the Primary Key generator ([Longkey](https://github.com/longbridgeapp/longkey), Sequence, Snowflake ...).
+- Integrated primary key generator (Snowflake, PostgreSQL Sequence, Custom, ...).
 
 ## Sharding process
 
@@ -47,7 +47,7 @@ db.Use(sharding.Register(sharding.Config{
         }
         return "", errors.New("invalid user_id")
     },
-    PrimaryKeyGenerator: sharding.PKLongKey,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
 }, "orders").Register(sharding.Config{
     ShardingKey: "user_id",
     ShardingAlgorithm: func(value interface{}) (suffix string, err error) {
@@ -104,9 +104,8 @@ When you sharding tables, you need consider how the primary key generate.
 
 Recommend options:
 
-- [LongKey](https://github.com/longbridgeapp/longkey)
-- [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
 - [Snowflake](https://github.com/bwmarrin/snowflake)
+- [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
 
 ## License
 

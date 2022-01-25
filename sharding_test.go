@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/assert"
-	"github.com/longbridgeapp/longkey"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/hints"
@@ -70,12 +70,14 @@ var (
 			return fmt.Sprintf("_%02d", userId%4), nil
 		},
 		ShardingAlgorithmByPrimaryKey: func(id int64) (suffix string) {
-			return fmt.Sprintf("_%02d", longkey.TableIdx(id))
+			return fmt.Sprintf("_%02d", snowflake.ParseInt64(id).Node())
 		},
-		PrimaryKeyGenerator: PKLongKey,
+		PrimaryKeyGenerator: PKSnowflake,
 	}
 
 	middleware = Register(shardingConfig, &Order{})
+
+	node, _ = snowflake.NewNode(1)
 )
 
 func init() {
@@ -115,17 +117,17 @@ func TestFillID(t *testing.T) {
 }
 
 func TestSelect1(t *testing.T) {
-	tx := db.Model(&Order{}).Where("user_id", 101).Where("id", longkey.Next(1)).Find(&[]Order{})
+	tx := db.Model(&Order{}).Where("user_id", 101).Where("id", node.Generate().Int64()).Find(&[]Order{})
 	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "user_id" = $1 AND "id" = $2`, tx)
 }
 
 func TestSelect2(t *testing.T) {
-	tx := db.Model(&Order{}).Where("id", longkey.Next(1)).Where("user_id", 101).Find(&[]Order{})
+	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Where("user_id", 101).Find(&[]Order{})
 	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "id" = $1 AND "user_id" = $2`, tx)
 }
 
 func TestSelect3(t *testing.T) {
-	tx := db.Model(&Order{}).Where("id", longkey.Next(1)).Where("user_id = 101").Find(&[]Order{})
+	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Where("user_id = 101").Find(&[]Order{})
 	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "id" = $1 AND "user_id" = 101`, tx)
 }
 
@@ -140,17 +142,17 @@ func TestSelect5(t *testing.T) {
 }
 
 func TestSelect6(t *testing.T) {
-	tx := db.Model(&Order{}).Where("id", longkey.Next(2)).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_02" WHERE "id" = $1`, tx)
+	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "id" = $1`, tx)
 }
 
 func TestSelect7(t *testing.T) {
-	tx := db.Model(&Order{}).Where("user_id", 101).Where("id > ?", longkey.Next(1)).Find(&[]Order{})
+	tx := db.Model(&Order{}).Where("user_id", 101).Where("id > ?", node.Generate().Int64()).Find(&[]Order{})
 	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "user_id" = $1 AND "id" > $2`, tx)
 }
 
 func TestSelect8(t *testing.T) {
-	tx := db.Model(&Order{}).Where("id > ?", longkey.Next(1)).Where("user_id", 101).Find(&[]Order{})
+	tx := db.Model(&Order{}).Where("id > ?", node.Generate().Int64()).Where("user_id", 101).Find(&[]Order{})
 	assertQueryResult(t, `SELECT * FROM "orders_01" WHERE "id" > $1 AND "user_id" = $2`, tx)
 }
 
