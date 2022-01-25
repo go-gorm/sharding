@@ -221,6 +221,8 @@ github.com/lightstep/lightstep-tracer-common/golang/gogo v0.0.0-20190605223551-b
 github.com/lightstep/lightstep-tracer-go v0.18.1/go.mod h1:jlF1pusYV4pidLvZ+XD0UBX0ZE6WURAspgAczcDHrL4=
 github.com/longbridgeapp/assert v0.1.0 h1:KkQlHUJSpuUFkUDjwBJgghFl31+wwSDHTq/WRrvLjko=
 github.com/longbridgeapp/assert v0.1.0/go.mod h1:ew3umReliXtk1bBG4weVURxdvR0tsN+rCEfjnA4YfxI=
+github.com/longbridgeapp/longkey v0.1.0 h1:FW7I89nQNVYal3n0RBSy1eusQQmtTHNLcPsiXHDrEFM=
+github.com/longbridgeapp/longkey v0.1.0/go.mod h1:Wt5u8YLL9HThTU3ecmu+BgXxsq73CQxbWYr5ssEvTuA=
 github.com/longbridgeapp/sqlparser v0.2.0 h1:A6gvcqGYWpLrLbD2OoXoiMQsyUc9bg24aah902dXgN8=
 github.com/longbridgeapp/sqlparser v0.2.0/go.mod h1:GIHaUq8zvYyHLCLMJJykx1CdM6LHtkUih/QaJXySSx4=
 github.com/lyft/protoc-gen-validate v0.0.13/go.mod h1:XbGvPuh87YZc5TdIa2/I4pLk0QoUACkjt2znoq26NVQ=

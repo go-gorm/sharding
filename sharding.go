@@ -47,24 +47,24 @@ type Config struct {
 
 	// ShardingAlgorithmByPrimaryKey specifies a function to generate the sharding
 	// table's suffix by the primary key. Used when no sharding key specified.
-	// For example, this function use the Keygen library to generate the suffix.
+	// For example, this function use the LongKey library to generate the suffix.
 	//
 	// 	func(id int64) (suffix string) {
-	//		return fmt.Sprintf("_%02d", keygen.TableIdx(id))
+	//		return fmt.Sprintf("_%02d", longkey.TableIdx(id))
 	//	}
 	ShardingAlgorithmByPrimaryKey func(id int64) (suffix string)
 
 	// PrimaryKeyGenerate specifies a function to generate the primary key.
 	// Used only when insert and the record does not contains an id field.
 	// We recommend you use the
-	// [keygen](https://gorm.io/sharding /tree/main/keygen) component,
+	// [LongKey](https://github.com/longbridgeapp/longkey) component,
 	// it is a distributed primary key generator.
 	// When use auto-increment like generator, the tableIdx argument could ignored.
 	//
-	// For example, this function use the Keygen library to generate the primary key.
+	// For example, this function use the LongKey library to generate the primary key.
 	//
 	// 	func(tableIdx int64) int64 {
-	//		return keygen.Next(tableIdx)
+	//		return longkey.Next(tableIdx)
 	//	}
 	PrimaryKeyGenerate func(tableIdx int64) int64
 }
