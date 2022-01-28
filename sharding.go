@@ -354,10 +354,7 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 		if name.Name == key {
 			switch expr := exprs[i].(type) {
 			case *sqlparser.BindExpr:
-				value, err = getBindValue(expr.Name, args)
-				if err != nil {
-					return nil, 0, keyFind, err
-				}
+				value = args[expr.Pos]
 			case *sqlparser.StringLit:
 				value = expr.Value
 			case *sqlparser.NumberLit:
@@ -384,10 +381,7 @@ func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...
 					keyFind = true
 					switch expr := n.Y.(type) {
 					case *sqlparser.BindExpr:
-						value, err = getBindValue(expr.Name, args)
-						if err != nil {
-							return err
-						}
+						value = args[expr.Pos]
 					case *sqlparser.StringLit:
 						value = expr.Value
 					case *sqlparser.NumberLit:
@@ -399,10 +393,7 @@ func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...
 				} else if x.Name == "id" && n.Op == sqlparser.EQ {
 					switch expr := n.Y.(type) {
 					case *sqlparser.BindExpr:
-						v, err := getBindValue(expr.Name, args)
-						if err != nil {
-							return err
-						}
+						v := args[expr.Pos]
 						var ok bool
 						if id, ok = v.(int64); !ok {
 							return fmt.Errorf("ID should be int64 type")
@@ -443,15 +434,6 @@ func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName
 	}
 
 	return orderBy
-}
-
-func getBindValue(value interface{}, args []interface{}) (interface{}, error) {
-	bindPos := strings.Replace(value.(string), "$", "", 1)
-	pos, err := strconv.Atoi(bindPos)
-	if err != nil {
-		return nil, err
-	}
-	return args[pos-1], nil
 }
 
 func pgSeqName(table string) string {
