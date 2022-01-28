@@ -1,6 +1,6 @@
 # Gorm Sharding
 
-[![Go](https://github.com/go-gorm/sharding/actions/workflows/go.yml/badge.svg)](https://github.com/go-gorm/sharding/actions/workflows/go.yml)
+[![Go](https://github.com/go-gorm/sharding/actions/workflows/tests.yml/badge.svg)](https://github.com/go-gorm/sharding/actions/workflows/tests.yml)
 
 Gorm Sharding plugin using SQL parser and replace for splits large tables into smaller ones, redirects Query into sharding tables. Give you a high performance database access.
 
@@ -12,7 +12,7 @@ Gorm Sharding 是一个高性能的数据库分表中间件。
 
 - Non-intrusive design. Load the plugin, specify the config, and all done.
 - Lighting-fast. No network based middlewares, as fast as Go.
-- Multiple database support. PostgreSQL tested, MySQL and SQLite is coming.
+- Multiple database (PostgreSQL, MySQL) support.
 - Integrated primary key generator (Snowflake, PostgreSQL Sequence, Custom, ...).
 
 ## Sharding process
@@ -29,16 +29,19 @@ go get -u gorm.io/sharding
 
 ## Usage
 
-Open a db session.
+Config the sharding middleware, register the tables which you want to shard.
 
 ```go
-dsn := "postgres://localhost:5432/sharding-db?sslmode=disable"
-db, err := gorm.Open(postgres.New(postgres.Config{DSN: dsn}))
-```
+import (
+  "fmt"
 
-Config the sharding middleware, register the tables which you want to shard. See [Godoc](https://pkg.go.dev/github.com/go-gorm/sharding) for config details.
+  "gorm.io/driver/postgres"
+  "gorm.io/gorm"
+  "gorm.io/sharding"
+)
 
-```go
+db, err := gorm.Open(postgres.New(postgres.Config{DSN: "postgres://localhost:5432/sharding-db?sslmode=disable"))
+
 db.Use(sharding.Register(sharding.Config{
     ShardingKey:         "user_id",
     NumberOfShards:      64,
