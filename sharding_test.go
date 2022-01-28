@@ -2,10 +2,13 @@ package sharding
 
 import (
 	"os"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/assert"
+	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/hints"
@@ -43,9 +46,7 @@ var (
 		DSN:                  databaseURL(),
 		PreferSimpleProtocol: true,
 	}
-	db, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
-		DisableForeignKeyConstraintWhenMigrating: true,
-	})
+	db *gorm.DB
 
 	shardingConfig = Config{
 		DoubleWrite:         true,
@@ -59,6 +60,16 @@ var (
 )
 
 func init() {
+	if os.Getenv("DIALECTOR") == "mysql" {
+		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	} else {
+		db, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	}
+
 	dropTables()
 	err := db.AutoMigrate(&Order{}, &Category{})
 	if err != nil {
@@ -67,7 +78,7 @@ func init() {
 	stables := []string{"orders_0", "orders_1", "orders_2", "orders_3"}
 	for _, table := range stables {
 		db.Exec(`CREATE TABLE ` + table + ` (
-			id BIGSERIAL PRIMARY KEY,
+			id bigint PRIMARY KEY,
 			user_id bigint,
 			product text
 		)`)
@@ -85,58 +96,59 @@ func dropTables() {
 
 func TestInsert(t *testing.T) {
 	tx := db.Create(&Order{ID: 100, UserID: 100, Product: "iPhone"})
-	assertQueryResult(t, `INSERT INTO "orders_0" ("user_id", "product", "id") VALUES ($1, $2, $3) RETURNING "id"`, tx)
+	assertQueryResult(t, `INSERT INTO orders_0 ("user_id", "product", "id") VALUES ($1, $2, $3) RETURNING "id"`, tx)
 }
 
 func TestFillID(t *testing.T) {
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
+	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES`
 	lastQuery := middleware.LastQuery()
-	assert.Equal(t, `INSERT INTO "orders_0" ("user_id", "product", "id") VALUES`, lastQuery[0:58])
+	assert.Equal(t, toDialect(expected), lastQuery[0:len(expected)])
 }
 
 func TestSelect1(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id", 101).Where("id", node.Generate().Int64()).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "user_id" = $1 AND "id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "user_id" = $1 AND "id" = $2`, tx)
 }
 
 func TestSelect2(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Where("user_id", 101).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "id" = $1 AND "user_id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "id" = $1 AND "user_id" = $2`, tx)
 }
 
 func TestSelect3(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Where("user_id = 101").Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "id" = $1 AND "user_id" = 101`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "id" = $1 AND user_id = 101`, tx)
 }
 
 func TestSelect4(t *testing.T) {
 	tx := db.Model(&Order{}).Where("product", "iPad").Where("user_id", 100).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_0" WHERE "product" = $1 AND "user_id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_0 WHERE "product" = $1 AND "user_id" = $2`, tx)
 }
 
 func TestSelect5(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id = 101").Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "user_id" = 101`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE user_id = 101`, tx)
 }
 
 func TestSelect6(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "id" = $1`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "id" = $1`, tx)
 }
 
 func TestSelect7(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id", 101).Where("id > ?", node.Generate().Int64()).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "user_id" = $1 AND "id" > $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "user_id" = $1 AND id > $2`, tx)
 }
 
 func TestSelect8(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id > ?", node.Generate().Int64()).Where("user_id", 101).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "id" > $1 AND "user_id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE id > $1 AND "user_id" = $2`, tx)
 }
 
 func TestSelect9(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id = 101").First(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "orders_1" WHERE "user_id" = 101 ORDER BY "orders_1"."id" LIMIT 1`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE user_id = 101 ORDER BY "orders_1"."id" LIMIT 1`, tx)
 }
 
 func TestSelect10(t *testing.T) {
@@ -150,8 +162,9 @@ func TestSelect11(t *testing.T) {
 }
 
 func TestSelect12(t *testing.T) {
-	tx := db.Raw(`SELECT * FROM "public"."orders" WHERE "user_id" = 101`).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM "public"."orders" WHERE "user_id" = 101`, tx)
+	sql := toDialect(`SELECT * FROM "public"."orders" WHERE user_id = 101`)
+	tx := db.Raw(sql).Find(&[]Order{})
+	assertQueryResult(t, sql, tx)
 }
 
 func TestSelect13(t *testing.T) {
@@ -161,12 +174,12 @@ func TestSelect13(t *testing.T) {
 
 func TestUpdate(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id = ?", 100).Update("product", "new title")
-	assertQueryResult(t, `UPDATE "orders_0" SET "product" = $1 WHERE "user_id" = $2`, tx)
+	assertQueryResult(t, `UPDATE orders_0 SET "product" = $1 WHERE user_id = $2`, tx)
 }
 
 func TestDelete(t *testing.T) {
 	tx := db.Where("user_id = ?", 100).Delete(&Order{})
-	assertQueryResult(t, `DELETE FROM "orders_0" WHERE "user_id" = $1`, tx)
+	assertQueryResult(t, `DELETE FROM orders_0 WHERE user_id = $1`, tx)
 }
 
 func TestInsertMissingShardingKey(t *testing.T) {
@@ -180,7 +193,8 @@ func TestSelectMissingShardingKey(t *testing.T) {
 }
 
 func TestSelectNoSharding(t *testing.T) {
-	err := db.Exec(`SELECT /* nosharding */ * FROM "orders" WHERE "product" = 'iPad'`).Error
+	sql := toDialect(`SELECT /* nosharding */ * FROM "orders" WHERE "product" = 'iPad'`)
+	err := db.Exec(sql).Error
 	assert.Equal(t, nil, err)
 }
 
@@ -211,19 +225,29 @@ func TestNoSharding(t *testing.T) {
 }
 
 func TestPKSnowflake(t *testing.T) {
-	db, _ := gorm.Open(postgres.New(dbConfig), &gorm.Config{
-		DisableForeignKeyConstraintWhenMigrating: true,
-	})
+	if os.Getenv("DIALECTOR") == "mysql" {
+		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	} else {
+		db, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	}
 	shardingConfig.PrimaryKeyGenerator = PKSnowflake
 	middleware := Register(shardingConfig, &Order{})
 	db.Use(middleware)
 
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
-	expected := `INSERT INTO "orders_0" ("user_id", "product", "id") VALUES ($1, $2, 148`
+	expected := toDialect(`INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, 148`)
 	assert.Equal(t, expected, middleware.LastQuery()[0:len(expected)])
 }
 
 func TestPKPGSequence(t *testing.T) {
+	if os.Getenv("DIALECTOR") == "mysql" {
+		return
+	}
+
 	db, _ := gorm.Open(postgres.New(dbConfig), &gorm.Config{
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
@@ -233,11 +257,21 @@ func TestPKPGSequence(t *testing.T) {
 
 	db.Exec("SELECT setval('" + pgSeqName("orders") + "', 42)")
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
-	expected := `INSERT INTO "orders_0" ("user_id", "product", "id") VALUES ($1, $2, 43) RETURNING "id"`
+	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, 43) RETURNING "id"`
 	assert.Equal(t, expected, middleware.LastQuery())
 }
 
-func assertQueryResult(t *testing.T, query string, tx *gorm.DB) {
+func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {
 	t.Helper()
-	assert.Equal(t, query, middleware.LastQuery())
+	assert.Equal(t, toDialect(expected), middleware.LastQuery())
+}
+
+func toDialect(sql string) string {
+	if os.Getenv("DIALECTOR") == "mysql" {
+		sql = strings.ReplaceAll(sql, `"`, "`")
+		r := regexp.MustCompile(`\$([0-9]+)`)
+		sql = r.ReplaceAllString(sql, "?")
+		sql = strings.ReplaceAll(sql, " RETURNING `id`", "")
+	}
+	return sql
 }
