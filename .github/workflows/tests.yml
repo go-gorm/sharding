@@ -1,0 +1,98 @@
+name: Tests
+on: [push]
+jobs:
+  postgres:
+    strategy:
+      matrix:
+        dbversion:
+          [
+            "postgres:latest",
+            "postgres:13",
+            "postgres:12",
+            "postgres:11",
+            "postgres:10",
+          ]
+        platform: [ubuntu-latest] # can not run in macOS and Windows
+    runs-on: ${{ matrix.platform }}
+
+    services:
+      postgres:
+        image: ${{ matrix.dbversion }}
+        env:
+          POSTGRES_DB: sharding-test
+          POSTGRES_USER: gorm
+          POSTGRES_PASSWORD: gorm
+          TZ: Asia/Shanghai
+        ports:
+          - 5432:5432
+        # Set health checks to wait until postgres has started
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DIALECTOR: postgres
+      DATABASE_URL: postgres://gorm:gorm@localhost:5432/sharding-test
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v1
+        with:
+          go-version: 1.17
+        id: go
+
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v1
+
+      - name: Get dependencies
+        run: |
+          go get -v -t -d ./...
+
+      - name: Test
+        run: go test
+  mysql:
+    name: MySQL
+
+    strategy:
+      matrix:
+        dbversion: ["mysql:latest", "mysql:5.7", "mariadb:latest"]
+        platform: [ubuntu-latest]
+    runs-on: ${{ matrix.platform }}
+
+    services:
+      mysql:
+        image: ${{ matrix.dbversion }}
+        env:
+          MYSQL_DATABASE: sharding-test
+          MYSQL_USER: gorm
+          MYSQL_PASSWORD: gorm
+          MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -ugorm -pgorm"
+          --health-interval 10s
+          --health-start-period 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DIALECTOR: mysql
+      DATABASE_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4&parseTime=True&loc=Local
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v1
+        with:
+          go-version: 1.17
+        id: go
+
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v1
+
+      - name: Get dependencies
+        run: |
+          go get -v -t -d ./...
+
+      - name: Test
+        run: go test
