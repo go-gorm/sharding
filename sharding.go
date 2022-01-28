@@ -14,12 +14,6 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-const (
-	PKSnowflake  = iota // Use Snowflake primary key generator
-	PKPGSequence        // Use PostgreSQL sequence primary key generator
-	PKCustom            // Use custom primary key generator
-)
-
 var (
 	ErrMissingShardingKey = errors.New("sharding key or id required, and use operator =")
 	ErrInvalidID          = errors.New("invalid id format")
@@ -109,17 +103,10 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 		}
 
 		if c.PrimaryKeyGenerator == PKSnowflake {
-			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
-				return s.snowflakeNodes[index].Generate().Int64()
-			}
+			c.PrimaryKeyGeneratorFn = s.genSnowflakeKey
 		} else if c.PrimaryKeyGenerator == PKPGSequence {
 			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
-				var id int64
-				err := s.DB.Raw("SELECT nextval('" + pgSeqName(t) + "')").Scan(&id).Error
-				if err != nil {
-					panic(err)
-				}
-				return id
+				return s.genPostgreSQLSequenceKey(t, index)
 			}
 		} else if c.PrimaryKeyGenerator == PKCustom {
 			if c.PrimaryKeyGeneratorFn == nil {
@@ -434,8 +421,4 @@ func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName
 	}
 
 	return orderBy
-}
-
-func pgSeqName(table string) string {
-	return fmt.Sprintf("gorm_sharding_%s_id_seq", table)
 }
