@@ -1,6 +1,7 @@
 package sharding
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -238,8 +239,12 @@ func TestPKSnowflake(t *testing.T) {
 	middleware := Register(shardingConfig, &Order{})
 	db.Use(middleware)
 
+	node, _ := snowflake.NewNode(0)
+	sfid := node.Generate().Int64()
+	expected := fmt.Sprintf(`INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, %d`, sfid)[0:68]
+	expected = toDialect(expected)
+
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
-	expected := toDialect(`INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, 148`)
 	assert.Equal(t, expected, middleware.LastQuery()[0:len(expected)])
 }
 
