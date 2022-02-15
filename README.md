@@ -21,51 +21,50 @@ This graph show up how Gorm Sharding works.
 
 ```mermaid
 graph TD
-first("SQL Query<br><br>
-select * from orders<br>
-where user_id = ? and status = ?<br>
-limit 10 order by id desc<br>
+first("SELECT * FROM orders WHERE user_id = ? AND status = ?
 args = [100, 1]")
 
-first--->| Gorm Query |db["Gorm DB"]
+first--->gorm(["Gorm Query"])
 
 subgraph "Gorm"
-  db-->gorm_query
-  gorm_query["connPool.QueryContext(sql, args)<br>"]
+  gorm--->gorm_query
+  gorm--->gorm_exec
+  gorm--->gorm_queryrow
+  gorm_query["connPool.QueryContext(sql, args)"]
+  gorm_exec[/"connPool.ExecContext"/]
+  gorm_queryrow[/"connPool.QueryRowContext"/]
 end
 
-subgraph "database/sql - Conn"
+subgraph "database/sql" 
+  gorm_query-->conn(["Conn"])
+  gorm_exec-->conn(["Conn"])
+  gorm_queryrow-->conn(["Conn"])
   ExecContext[/"ExecContext"/]
   QueryContext[/"QueryContext"/]
   QueryRowContext[/"QueryRowContext"/]
-  gorm_query-->Conn
-  Conn(["Conn"])
-  Conn-->ExecContext
-  Conn-->QueryContext
-  Conn-->QueryRowContext
+
+
+  conn-->ExecContext
+  conn-->QueryRowContext
+  conn-->QueryContext
 end
 
-subgraph sharding ["MyConnPool"]
-  QueryContext-->router-->format_sql-->parse-->check_table
-  router[["router(sql, args)<br><br>"]]
-  format_sql>"Format sql, args for get full SQL<br><br>
-    sql = select * from orders<br>
-    where user_id = 100 and status = 1<br>
-    limit 10 order by id desc"]
+subgraph sharding ["Sharding"]
+  QueryContext-->router-->| Format to get full SQL string |format_sql-->| Parser to AST |parse-->check_table
+  router[["router(sql, args)<br>"]]
+  format_sql>"sql = SELECT * FROM orders WHERE user_id = 100 AND status = 1"]
 
   check_table{"Check sharding rules<br>by table name"}
   check_table-->| Exist |process_ast
   check_table_1{{"Return Raw SQL"}}
   not_match_error[/"Return Error<br>SQL query must has sharding key"\]
 
-  parse[["Parser SQL to get AST<br>
-  <br>
-  ast = sqlparser.Parse(sql)"]]
+  parse[["ast = sqlparser.Parse(sql)"]]
 
   check_table-.->| Not exist |check_table_1
   process_ast(("Sharding rules"))
   get_new_table_name[["Use value in WhereValue (100) for get sharding table index<br>orders + (100 % 16)<br>Sharding Table = orders_4"]]
-  new_sql{{"select * from orders_4<br>where user_id = 100 and status = 1<br>limit 10 order by id desc"}}
+  new_sql{{"SELECT * FROM orders_4 WHERE user_id = 100 AND status = 1"}}
 
   process_ast-.->| Not match ShardingKey |not_match_error
   process_ast-->| Match ShardingKey |match_sharding_key-->| Get table name |get_new_table_name-->| Replace TableName to get new SQL |new_sql
