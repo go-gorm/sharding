@@ -15,77 +15,6 @@ Gorm Sharding 是一个高性能的数据库分表中间件。
 - Multiple database (PostgreSQL, MySQL) support.
 - Integrated primary key generator (Snowflake, PostgreSQL Sequence, Custom, ...).
 
-## Sharding process
-
-This graph show up how Gorm Sharding works.
-
-```mermaid
-graph TD
-first("SELECT * FROM orders WHERE user_id = ? AND status = ?
-args = [100, 1]")
-
-first--->gorm(["Gorm Query"])
-
-subgraph "Gorm"
-  gorm--->gorm_query
-  gorm--->gorm_exec
-  gorm--->gorm_queryrow
-  gorm_query["connPool.QueryContext(sql, args)"]
-  gorm_exec[/"connPool.ExecContext"/]
-  gorm_queryrow[/"connPool.QueryRowContext"/]
-end
-
-subgraph "database/sql" 
-  gorm_query-->conn(["Conn"])
-  gorm_exec-->conn(["Conn"])
-  gorm_queryrow-->conn(["Conn"])
-  ExecContext[/"ExecContext"/]
-  QueryContext[/"QueryContext"/]
-  QueryRowContext[/"QueryRowContext"/]
-
-
-  conn-->ExecContext
-  conn-->QueryRowContext
-  conn-->QueryContext
-end
-
-subgraph sharding ["Sharding"]
-  QueryContext-->router-->| Format to get full SQL string |format_sql-->| Parser to AST |parse-->check_table
-  router[["router(sql, args)<br>"]]
-  format_sql>"sql = SELECT * FROM orders WHERE user_id = 100 AND status = 1"]
-
-  check_table{"Check sharding rules<br>by table name"}
-  check_table-->| Exist |process_ast
-  check_table_1{{"Return Raw SQL"}}
-  not_match_error[/"Return Error<br>SQL query must has sharding key"\]
-
-  parse[["ast = sqlparser.Parse(sql)"]]
-
-  check_table-.->| Not exist |check_table_1
-  process_ast(("Sharding rules"))
-  get_new_table_name[["Use value in WhereValue (100) for get sharding table index<br>orders + (100 % 16)<br>Sharding Table = orders_4"]]
-  new_sql{{"SELECT * FROM orders_4 WHERE user_id = 100 AND status = 1"}}
-
-  process_ast-.->| Not match ShardingKey |not_match_error
-  process_ast-->| Match ShardingKey |match_sharding_key-->| Get table name |get_new_table_name-->| Replace TableName to get new SQL |new_sql
-end
-
-
-subgraph database [Database]
-  orders_other[("orders_0, orders_1 ... orders_3")]
-  orders_4[(orders_4)]
-  orders_last[("orders_5 ... orders_15")]
-  other_tables[(Other non-sharding tables<br>users, stocks, topics ...)]
-
-  new_sql-->| Sharding Query | orders_4
-  check_table_1-.->| None sharding Query |other_tables
-end
-
-orders_4-->result
-other_tables-.->result
-result[/Query results\]
-```
-
 ## Install
 
 ```bash
@@ -162,6 +91,77 @@ Recommend options:
 
 - [Snowflake](https://github.com/bwmarrin/snowflake)
 - [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
+
+## Sharding process
+
+This graph show up how Gorm Sharding works.
+
+```mermaid
+graph TD
+first("SELECT * FROM orders WHERE user_id = ? AND status = ?
+args = [100, 1]")
+
+first--->gorm(["Gorm Query"])
+
+subgraph "Gorm"
+  gorm--->gorm_query
+  gorm--->gorm_exec
+  gorm--->gorm_queryrow
+  gorm_query["connPool.QueryContext(sql, args)"]
+  gorm_exec[/"connPool.ExecContext"/]
+  gorm_queryrow[/"connPool.QueryRowContext"/]
+end
+
+subgraph "database/sql" 
+  gorm_query-->conn(["Conn"])
+  gorm_exec-->conn(["Conn"])
+  gorm_queryrow-->conn(["Conn"])
+  ExecContext[/"ExecContext"/]
+  QueryContext[/"QueryContext"/]
+  QueryRowContext[/"QueryRowContext"/]
+
+
+  conn-->ExecContext
+  conn-->QueryRowContext
+  conn-->QueryContext
+end
+
+subgraph sharding ["Sharding"]
+  QueryContext-->router-->| Format to get full SQL string |format_sql-->| Parser to AST |parse-->check_table
+  router[["router(sql, args)<br>"]]
+  format_sql>"sql = SELECT * FROM orders WHERE user_id = 100 AND status = 1"]
+
+  check_table{"Check sharding rules<br>by table name"}
+  check_table-->| Exist |process_ast
+  check_table_1{{"Return Raw SQL"}}
+  not_match_error[/"Return Error<br>SQL query must has sharding key"\]
+
+  parse[["ast = sqlparser.Parse(sql)"]]
+
+  check_table-.->| Not exist |check_table_1
+  process_ast(("Sharding rules"))
+  get_new_table_name[["Use value in WhereValue (100) for get sharding table index<br>orders + (100 % 16)<br>Sharding Table = orders_4"]]
+  new_sql{{"SELECT * FROM orders_4 WHERE user_id = 100 AND status = 1"}}
+
+  process_ast-.->| Not match ShardingKey |not_match_error
+  process_ast-->| Match ShardingKey |match_sharding_key-->| Get table name |get_new_table_name-->| Replace TableName to get new SQL |new_sql
+end
+
+
+subgraph database [Database]
+  orders_other[("orders_0, orders_1 ... orders_3")]
+  orders_4[(orders_4)]
+  orders_last[("orders_5 ... orders_15")]
+  other_tables[(Other non-sharding tables<br>users, stocks, topics ...)]
+
+  new_sql-->| Sharding Query | orders_4
+  check_table_1-.->| None sharding Query |other_tables
+end
+
+orders_4-->result
+other_tables-.->result
+result[/Query results\]
+```
 
 ## License
 
