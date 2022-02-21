@@ -21,17 +21,9 @@ type Order struct {
 	Product string
 }
 
-func (Order) TableName() string {
-	return "orders"
-}
-
 type Category struct {
 	ID   int64 `gorm:"primarykey"`
 	Name string
-}
-
-func (Category) TableName() string {
-	return "categories"
 }
 
 func databaseURL() string {

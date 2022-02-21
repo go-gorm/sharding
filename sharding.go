@@ -11,7 +11,6 @@ import (
 	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/sqlparser"
 	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
 )
 
 var (
@@ -25,6 +24,9 @@ type Sharding struct {
 	configs        map[string]Config
 	querys         sync.Map
 	snowflakeNodes []*snowflake.Node
+
+	_config Config
+	_tables []interface{}
 }
 
 //  Config specifies the configuration for sharding.
@@ -80,20 +82,27 @@ type Config struct {
 }
 
 func Register(config Config, tables ...interface{}) *Sharding {
-	return (&Sharding{}).Register(config, tables...)
+	return &Sharding{
+		_config: config,
+		_tables: tables,
+	}
 }
 
-func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
+func (s *Sharding) compile() error {
 	if s.configs == nil {
 		s.configs = make(map[string]Config)
 	}
-	for _, table := range tables {
+	for _, table := range s._tables {
 		if t, ok := table.(string); ok {
-			s.configs[t] = config
-		} else if t, ok := table.(schema.Tabler); ok {
-			s.configs[t.TableName()] = config
+			s.configs[t] = s._config
 		} else {
-			panic("invalid config, use string table name or schema.Tabler")
+			// stmt := &gorm.Statement{DB: s.DB}
+			stmt := s.DB.Statement
+			if err := stmt.Parse(table); err == nil {
+				s.configs[stmt.Table] = s._config
+			} else {
+				return err
+			}
 		}
 	}
 
@@ -159,7 +168,7 @@ func (s *Sharding) Register(config Config, tables ...interface{}) *Sharding {
 		s.configs[t] = c
 	}
 
-	return s
+	return nil
 }
 
 // Name plugin name for Gorm plugin interface
@@ -199,7 +208,7 @@ func (s *Sharding) Initialize(db *gorm.DB) error {
 		s.snowflakeNodes[i] = n
 	}
 
-	return nil
+	return s.compile()
 }
 
 // resolve split the old query to full table query and sharding table query
