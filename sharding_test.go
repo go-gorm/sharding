@@ -38,6 +38,9 @@ func databaseURL() string {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if len(databaseURL) == 0 {
 		databaseURL = "postgres://localhost:5432/sharding-test?sslmode=disable"
+		if os.Getenv("DIALECTOR") == "mysql" {
+			databaseURL = "root@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4"
+		}
 	}
 	return databaseURL
 }
