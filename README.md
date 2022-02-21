@@ -83,6 +83,8 @@ fmt.Println(err) // ErrMissingShardingKey
 
 The full example is [here](./examples/order.go).
 
+Note: Gorm config `PrepareStmt: true` is not supported for now.
+
 ## Primary Key
 
 When you sharding tables, you need consider how the primary key generate.
@@ -112,7 +114,7 @@ subgraph "Gorm"
   gorm_queryrow[/"connPool.QueryRowContext"/]
 end
 
-subgraph "database/sql" 
+subgraph "database/sql"
   gorm_query-->conn(["Conn"])
   gorm_exec-->conn(["Conn"])
   gorm_queryrow-->conn(["Conn"])
