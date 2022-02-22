@@ -21,17 +21,9 @@ type Order struct {
 	Product string
 }
 
-func (Order) TableName() string {
-	return "orders"
-}
-
 type Category struct {
 	ID   int64 `gorm:"primarykey"`
 	Name string
-}
-
-func (Category) TableName() string {
-	return "categories"
 }
 
 func databaseURL() string {
@@ -74,7 +66,9 @@ func init() {
 		})
 	}
 
+	fmt.Println("Clean only tables ...")
 	dropTables()
+	fmt.Println("AutoMigrate tables ...")
 	err := db.AutoMigrate(&Order{}, &Category{})
 	if err != nil {
 		panic(err)
@@ -95,6 +89,7 @@ func dropTables() {
 	tables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
 	for _, table := range tables {
 		db.Exec("DROP TABLE IF EXISTS " + table)
+		db.Exec(("DROP SEQUENCE IF EXISTS gorm_sharding_" + table + "_id_seq"))
 	}
 }
 
