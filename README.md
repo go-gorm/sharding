@@ -83,7 +83,7 @@ fmt.Println(err) // ErrMissingShardingKey
 
 The full example is [here](./examples/order.go).
 
-Note: Gorm config `PrepareStmt: true` is not supported for now.
+> 🚨 NOTE: Gorm config `PrepareStmt: true` is not supported for now.
 
 ## Primary Key
 
