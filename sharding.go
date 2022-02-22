@@ -114,20 +114,27 @@ func (s *Sharding) compile() error {
 		if c.PrimaryKeyGenerator == PKSnowflake {
 			c.PrimaryKeyGeneratorFn = s.genSnowflakeKey
 		} else if c.PrimaryKeyGenerator == PKPGSequence {
+
+			// Execute SQL to CREATE SEQUENCE for this table if not exist
+			err := s.createPostgreSQLSequenceKeyIfNotExist(t)
+			if err != nil {
+				return err
+			}
+
 			c.PrimaryKeyGeneratorFn = func(index int64) int64 {
 				return s.genPostgreSQLSequenceKey(t, index)
 			}
 		} else if c.PrimaryKeyGenerator == PKCustom {
 			if c.PrimaryKeyGeneratorFn == nil {
-				panic("PrimaryKeyGeneratorFn not configured")
+				return errors.New("PrimaryKeyGeneratorFn is required when use PKCustom")
 			}
 		} else {
-			panic("PrimaryKeyGenerator can only be one of PKSnowflake, PKPGSequence and PKCustom")
+			return errors.New("PrimaryKeyGenerator can only be one of PKSnowflake, PKPGSequence and PKCustom")
 		}
 
 		if c.ShardingAlgorithm == nil {
 			if c.NumberOfShards == 0 {
-				panic("specify NumberOfShards or ShardingAlgorithm")
+				return errors.New("specify NumberOfShards or ShardingAlgorithm")
 			}
 			if c.NumberOfShards < 10 {
 				c.tableFormat = "_%01d"
