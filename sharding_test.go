@@ -37,22 +37,46 @@ func databaseURL() string {
 	return databaseURL
 }
 
+func databaseReadURL() string {
+	databaseURL := os.Getenv("DATABASE_READ_URL")
+	if len(databaseURL) == 0 {
+		databaseURL = "postgres://localhost:5432/sharding-read-test?sslmode=disable"
+		if os.Getenv("DIALECTOR") == "mysql" {
+			databaseURL = "root@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4"
+		}
+	}
+	return databaseURL
+}
+
+func databaseWriteURL() string {
+	databaseURL := os.Getenv("DATABASE_WRITE_URL")
+	if len(databaseURL) == 0 {
+		databaseURL = "postgres://localhost:5432/sharding-write-test?sslmode=disable"
+		if os.Getenv("DIALECTOR") == "mysql" {
+			databaseURL = "root@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4"
+		}
+	}
+	return databaseURL
+}
+
 var (
 	dbConfig = postgres.Config{
 		DSN:                  databaseURL(),
 		PreferSimpleProtocol: true,
 	}
-	db *gorm.DB
-
-	shardingConfig = Config{
-		DoubleWrite:         true,
-		ShardingKey:         "user_id",
-		NumberOfShards:      4,
-		PrimaryKeyGenerator: PKSnowflake,
+	dbReadConfig = postgres.Config{
+		DSN:                  databaseReadURL(),
+		PreferSimpleProtocol: true,
 	}
+	dbWriteConfig = postgres.Config{
+		DSN:                  databaseWriteURL(),
+		PreferSimpleProtocol: true,
+	}
+	db, dbRead, dbWrite *gorm.DB
 
-	middleware = Register(shardingConfig, &Order{})
-	node, _    = snowflake.NewNode(1)
+	shardingConfig Config
+	middleware     *Sharding
+	node, _        = snowflake.NewNode(1)
 )
 
 func init() {
@@ -60,11 +84,34 @@ func init() {
 		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
+		dbRead, _ = gorm.Open(mysql.Open(databaseReadURL()), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+		dbWrite, _ = gorm.Open(mysql.Open(databaseWriteURL()), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
 	} else {
 		db, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
+		dbRead, _ = gorm.Open(postgres.New(dbReadConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+		dbWrite, _ = gorm.Open(postgres.New(dbWriteConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
 	}
+
+	shardingConfig = Config{
+		DoubleWrite:         true,
+		ShardingKey:         "user_id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKSnowflake,
+		ReadConnections:     []gorm.Dialector{dbRead.Dialector},
+		WriteConnections:    []gorm.Dialector{dbWrite.Dialector},
+	}
+
+	middleware = Register(shardingConfig, &Order{})
 
 	fmt.Println("Clean only tables ...")
 	dropTables()
@@ -80,6 +127,16 @@ func init() {
 			user_id bigint,
 			product text
 		)`)
+		dbRead.Exec(`CREATE TABLE ` + table + ` (
+			id bigint PRIMARY KEY,
+			user_id bigint,
+			product text
+		)`)
+		dbWrite.Exec(`CREATE TABLE ` + table + ` (
+			id bigint PRIMARY KEY,
+			user_id bigint,
+			product text
+		)`)
 	}
 
 	db.Use(middleware)
@@ -89,6 +146,8 @@ func dropTables() {
 	tables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
 	for _, table := range tables {
 		db.Exec("DROP TABLE IF EXISTS " + table)
+		dbRead.Exec("DROP TABLE IF EXISTS " + table)
+		dbWrite.Exec("DROP TABLE IF EXISTS " + table)
 		db.Exec(("DROP SEQUENCE IF EXISTS gorm_sharding_" + table + "_id_seq"))
 	}
 }
@@ -262,6 +321,22 @@ func TestPKPGSequence(t *testing.T) {
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
 	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, 43) RETURNING "id"`
 	assert.Equal(t, expected, middleware.LastQuery())
+}
+
+func TestReadWriteConnections(t *testing.T) {
+	dbRead.Exec("INSERT INTO orders_0 (id, product, user_id) VALUES(1, 'iPad', 100)")
+	dbWrite.Exec("INSERT INTO orders_0 (id, product, user_id) VALUES(1, 'iPad', 100)")
+
+	var order Order
+	db.Model(&Order{}).Where("user_id", 100).Find(&order)
+	assert.Equal(t, "iPad", order.Product)
+
+	db.Model(&Order{}).Where("user_id", 100).Update("product", "iPhone")
+	db.Table("orders_0").Where("user_id", 100).Find(&order)
+	assert.Equal(t, "iPad", order.Product)
+
+	dbWrite.Table("orders_0").Where("user_id", 100).Find(&order)
+	assert.Equal(t, "iPhone", order.Product)
 }
 
 func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {

@@ -14,6 +14,7 @@ Gorm Sharding 是一个高性能的数据库分表中间件。
 - Lighting-fast. No network based middlewares, as fast as Go.
 - Multiple database (PostgreSQL, MySQL) support.
 - Integrated primary key generator (Snowflake, PostgreSQL Sequence, Custom, ...).
+- Readwrite-splitting.
 
 ## Install
 
@@ -93,6 +94,26 @@ Recommend options:
 
 - [Snowflake](https://github.com/bwmarrin/snowflake)
 - [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
+
+## Readwrite-splitting
+
+```go
+dsnRead := "host=localhost user=gorm password=gorm dbname=gorm-slave port=5432 sslmode=disable"
+dsnWrite := "host=localhost user=gorm password=gorm dbname=gorm port=5432 sslmode=disable"
+
+connRead := postgres.Open(dsnRead)
+connWrite := postgres.Open(dsnWrite)
+
+db, err := gorm.Open(connWrite, &gorm.Config{})
+
+db.Use(sharding.Register(sharding.Config{
+    ShardingKey:         "user_id",
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
+		ReadConnections:     []gorm.Dialector{connRead},
+		WriteConnections:    []gorm.Dialector{connWrite},
+}
+```
 
 ## Sharding process
 

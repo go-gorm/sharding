@@ -25,6 +25,9 @@ type Sharding struct {
 	querys         sync.Map
 	snowflakeNodes []*snowflake.Node
 
+	readConns  map[string][]gorm.ConnPool
+	writeConns map[string][]gorm.ConnPool
+
 	_config Config
 	_tables []interface{}
 }
@@ -79,6 +82,12 @@ type Config struct {
 	//		return nodes[tableIdx].Generate().Int64()
 	//	}
 	PrimaryKeyGeneratorFn func(tableIdx int64) int64
+
+	// ReadConnections specifies the connections for read, like SELECT.
+	ReadConnections []gorm.Dialector
+
+	// WriteConnections specifies the connections for wite, like CREATE, UPDATE, DELETE.
+	WriteConnections []gorm.Dialector
 }
 
 func Register(config Config, tables ...interface{}) *Sharding {
@@ -195,6 +204,30 @@ func (s *Sharding) LastQuery() string {
 // Initialize implement for Gorm plugin interface
 func (s *Sharding) Initialize(db *gorm.DB) error {
 	s.DB = db
+	err := s.compile()
+	if err != nil {
+		return err
+	}
+
+	s.readConns = make(map[string][]gorm.ConnPool)
+	s.writeConns = make(map[string][]gorm.ConnPool)
+	for t, c := range s.configs {
+		for _, dialector := range c.ReadConnections {
+			db, err := gorm.Open(dialector, s.DB.Config)
+			if err != nil {
+				return err
+			}
+			s.readConns[t] = append(s.readConns[t], db.Config.ConnPool)
+		}
+		for _, dialector := range c.WriteConnections {
+			db, err := gorm.Open(dialector, s.DB.Config)
+			if err != nil {
+				return err
+			}
+			s.writeConns[t] = append(s.writeConns[t], db.Config.ConnPool)
+		}
+	}
+
 	s.registerConnPool(db)
 
 	for t, c := range s.configs {
@@ -215,11 +248,11 @@ func (s *Sharding) Initialize(db *gorm.DB) error {
 		s.snowflakeNodes[i] = n
 	}
 
-	return s.compile()
+	return nil
 }
 
 // resolve split the old query to full table query and sharding table query
-func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName string, err error) {
+func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName, stmtType string, err error) {
 	ftQuery = query
 	stQuery = query
 	if len(s.configs) == 0 {
@@ -228,7 +261,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 	expr, err := sqlparser.NewParser(strings.NewReader(query)).ParseStatement()
 	if err != nil {
-		return ftQuery, stQuery, tableName, nil
+		return ftQuery, stQuery, tableName, stmtType, nil
 	}
 
 	var table *sqlparser.TableName
@@ -248,20 +281,23 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		}
 		table = tbl
 		condition = stmt.Condition
-
+		stmtType = "SELECT"
 	case *sqlparser.InsertStatement:
 		table = stmt.TableName
 		isInsert = true
 		insertNames = stmt.ColumnNames
 		insertValues = stmt.Expressions[0].Exprs
+		stmtType = "INSERT"
 	case *sqlparser.UpdateStatement:
 		condition = stmt.Condition
 		table = stmt.TableName
+		stmtType = "UPDATE"
 	case *sqlparser.DeleteStatement:
 		condition = stmt.Condition
 		table = stmt.TableName
+		stmtType = "DELETE"
 	default:
-		return ftQuery, stQuery, "", sqlparser.ErrNotImplemented
+		return ftQuery, stQuery, "", "", sqlparser.ErrNotImplemented
 	}
 
 	tableName = table.Name.Name
@@ -313,7 +349,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		if fillID {
 			tblIdx, err := strconv.Atoi(strings.Replace(suffix, "_", "", 1))
 			if err != nil {
-				return ftQuery, stQuery, tableName, err
+				return ftQuery, stQuery, tableName, "", err
 			}
 			id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
 			insertNames = append(insertNames, &sqlparser.Ident{Name: "id"})
