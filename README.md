@@ -110,8 +110,8 @@ db.Use(sharding.Register(sharding.Config{
     ShardingKey:         "user_id",
     NumberOfShards:      64,
     PrimaryKeyGenerator: sharding.PKSnowflake,
-		ReadConnections:     []gorm.Dialector{connRead},
-		WriteConnections:    []gorm.Dialector{connWrite},
+    ReadConnections:     []gorm.Dialector{connRead},
+    WriteConnections:    []gorm.Dialector{connWrite},
 }
 ```
 
