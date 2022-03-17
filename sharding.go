@@ -279,7 +279,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			return
 		}
 	} else {
-		value, id, keyFind, err = s.nonInsertValue(r.ShardingKey, condition, args...)
+		value, id, keyFind, err = s.nonInsertValue(r.ShardingKey, tableName, condition, args...)
 		if err != nil {
 			return
 		}
@@ -376,13 +376,13 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 	return
 }
 
-func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
+func (s *Sharding) nonInsertValue(key string, tableName string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
 	err = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
 		if n, ok := node.(*sqlparser.BinaryExpr); ok {
 			var x *sqlparser.Ident
 			if x1, ok := n.X.(*sqlparser.Ident); ok {
 				x = x1
-			} else if x2, ok := n.X.(*sqlparser.QualifiedRef); ok {
+			} else if x2, ok := n.X.(*sqlparser.QualifiedRef); ok && x2.Table.Name == tableName {
 				x = x2.Column
 			} else {
 				return nil
