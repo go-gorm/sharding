@@ -302,7 +302,8 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 	newTable := &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
 
-	fillID := true
+	//fillID := true
+	fillID := false // we don't want sharding fill the primary key
 	if isInsert {
 		for _, name := range insertNames {
 			if name.Name == "id" {
