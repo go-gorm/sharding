@@ -339,10 +339,12 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	case *sqlparser.UpdateStatement:
 		ftQuery = stmt.String()
 		stmt.TableName = newTable
+		stmt.Condition = replaceConditionByTableName(stmt.Condition, tableName, newTable.Name.Name)
 		stQuery = stmt.String()
 	case *sqlparser.DeleteStatement:
 		ftQuery = stmt.String()
 		stmt.TableName = newTable
+		stmt.Condition = replaceConditionByTableName(stmt.Condition, tableName, newTable.Name.Name)
 		stQuery = stmt.String()
 	}
 
