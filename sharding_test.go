@@ -13,6 +13,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/hints"
+	"gorm.io/plugin/dbresolver"
 )
 
 type Order struct {
@@ -107,8 +108,6 @@ func init() {
 		ShardingKey:         "user_id",
 		NumberOfShards:      4,
 		PrimaryKeyGenerator: PKSnowflake,
-		ReadConnections:     []gorm.Dialector{dbRead.Dialector},
-		WriteConnections:    []gorm.Dialector{dbWrite.Dialector},
 	}
 
 	middleware = Register(shardingConfig, &Order{})
@@ -323,9 +322,18 @@ func TestPKPGSequence(t *testing.T) {
 	assert.Equal(t, expected, middleware.LastQuery())
 }
 
-func TestReadWriteConnections(t *testing.T) {
+func TestReadWriteSplitting(t *testing.T) {
 	dbRead.Exec("INSERT INTO orders_0 (id, product, user_id) VALUES(1, 'iPad', 100)")
 	dbWrite.Exec("INSERT INTO orders_0 (id, product, user_id) VALUES(1, 'iPad', 100)")
+
+	db, _ := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	db.Use(dbresolver.Register(dbresolver.Config{
+		Sources:  []gorm.Dialector{dbWrite.Dialector},
+		Replicas: []gorm.Dialector{dbRead.Dialector},
+	}))
+	db.Use(middleware)
 
 	var order Order
 	db.Model(&Order{}).Where("user_id", 100).Find(&order)
