@@ -379,39 +379,47 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
 	err = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
 		if n, ok := node.(*sqlparser.BinaryExpr); ok {
-			if x, ok := n.X.(*sqlparser.Ident); ok {
-				if x.Name == key && n.Op == sqlparser.EQ {
-					keyFind = true
-					switch expr := n.Y.(type) {
-					case *sqlparser.BindExpr:
-						value = args[expr.Pos]
-					case *sqlparser.StringLit:
-						value = expr.Value
-					case *sqlparser.NumberLit:
-						value = expr.Value
-					default:
-						return sqlparser.ErrNotImplemented
-					}
-					return nil
-				} else if x.Name == "id" && n.Op == sqlparser.EQ {
-					switch expr := n.Y.(type) {
-					case *sqlparser.BindExpr:
-						v := args[expr.Pos]
-						var ok bool
-						if id, ok = v.(int64); !ok {
-							return fmt.Errorf("ID should be int64 type")
-						}
-					case *sqlparser.NumberLit:
-						id, err = strconv.ParseInt(expr.Value, 10, 64)
-						if err != nil {
-							return err
-						}
-					default:
-						return ErrInvalidID
-					}
-					return nil
-				}
+			var x *sqlparser.Ident
+			if x1, ok := n.X.(*sqlparser.Ident); ok {
+				x = x1
+			} else if x2, ok := n.X.(*sqlparser.QualifiedRef); ok {
+				x = x2.Column
+			} else {
+				return nil
 			}
+
+			if x.Name == key && n.Op == sqlparser.EQ {
+				keyFind = true
+				switch expr := n.Y.(type) {
+				case *sqlparser.BindExpr:
+					value = args[expr.Pos]
+				case *sqlparser.StringLit:
+					value = expr.Value
+				case *sqlparser.NumberLit:
+					value = expr.Value
+				default:
+					return sqlparser.ErrNotImplemented
+				}
+				return nil
+			} else if x.Name == "id" && n.Op == sqlparser.EQ {
+				switch expr := n.Y.(type) {
+				case *sqlparser.BindExpr:
+					v := args[expr.Pos]
+					var ok bool
+					if id, ok = v.(int64); !ok {
+						return fmt.Errorf("ID should be int64 type")
+					}
+				case *sqlparser.NumberLit:
+					id, err = strconv.ParseInt(expr.Value, 10, 64)
+					if err != nil {
+						return err
+					}
+				default:
+					return ErrInvalidID
+				}
+				return nil
+			}
+
 		}
 		return nil
 	}), condition)
