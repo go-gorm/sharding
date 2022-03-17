@@ -449,15 +449,16 @@ func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName
 }
 
 func replaceConditionByTableName(expr sqlparser.Expr, oldName, newName string) sqlparser.Expr {
-	x, ok := expr.(*sqlparser.QualifiedRef)
-	if !ok {
-		return expr
+	n, ok := expr.(*sqlparser.BinaryExpr)
+	if ok {
+		x, ok := n.X.(*sqlparser.QualifiedRef)
+		if ok {
+			// is QualifiedRef
+			if x.Table.Name == oldName {
+				x.Table.Name = newName
+			}
+		}
+		return n
 	}
-
-	// is QualifiedRef
-	if x.Table.Name == oldName {
-		x.Table.Name = newName
-	}
-
-	return x
+	return expr
 }
