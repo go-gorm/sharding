@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/sharding"
+	"github.com/jiekun/sharding"
 )
 
 type Order struct {

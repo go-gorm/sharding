@@ -1,4 +1,4 @@
-module gorm.io/sharding
+module github.com/jiekun/sharding
 
 go 1.17
 
