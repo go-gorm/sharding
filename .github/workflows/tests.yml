@@ -45,10 +45,10 @@ jobs:
         id: go
 
       - name: Create Read Database
-        run: psql -h localhost -U gorm -c 'CREATE DATABASE "sharding-read-test";'
+        run: PGPASSWORD=gorm psql -h localhost -U gorm -c 'CREATE DATABASE "sharding-read-test";'
 
       - name: Create Write Databases
-        run: psql -h localhost -U gorm -c 'CREATE DATABASE "sharding-write-test";'
+        run: PGPASSWORD=gorm psql -h localhost -U gorm -c 'CREATE DATABASE "sharding-write-test";'
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v1
