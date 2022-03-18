@@ -35,12 +35,20 @@ jobs:
     env:
       DIALECTOR: postgres
       DATABASE_URL: postgres://gorm:gorm@localhost:5432/sharding-test
+      DATABASE_READ_URL: postgres://gorm:gorm@localhost:5432/sharding-read-test
+      DATABASE_WRITE_URL: postgres://gorm:gorm@localhost:5432/sharding-write-test
     steps:
       - name: Set up Go
         uses: actions/setup-go@v1
         with:
           go-version: 1.17
         id: go
+
+      - name: Create Read Database
+        run: PGPASSWORD=gorm psql -h localhost -U gorm -d sharding-test -c 'CREATE DATABASE "sharding-read-test";'
+
+      - name: Create Write Databases
+        run: PGPASSWORD=gorm psql -h localhost -U gorm -d sharding-test -c 'CREATE DATABASE "sharding-write-test";'
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v1
@@ -67,7 +75,7 @@ jobs:
           MYSQL_DATABASE: sharding-test
           MYSQL_USER: gorm
           MYSQL_PASSWORD: gorm
-          MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+          MYSQL_ROOT_PASSWORD: gorm
         ports:
           - 3306:3306
         options: >-
@@ -80,12 +88,22 @@ jobs:
     env:
       DIALECTOR: mysql
       DATABASE_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4&parseTime=True&loc=Local
+      DATABASE_READ_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4&parseTime=True&loc=Local
+      DATABASE_WRITE_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4&parseTime=True&loc=Local
     steps:
       - name: Set up Go
         uses: actions/setup-go@v1
         with:
           go-version: 1.17
         id: go
+
+      - name: Create Read Database
+        run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-read-test
+        #run: mysql -e 'CREATE DATABASE sharding-read-test' -ugorm -pgorm
+
+      - name: Create Write Database
+        run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-write-test
+        #run: mysql -e 'CREATE DATABASE sharding-write-test' -ugorm -pgorm
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v1

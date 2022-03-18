@@ -195,7 +195,7 @@ func (s *Sharding) LastQuery() string {
 // Initialize implement for Gorm plugin interface
 func (s *Sharding) Initialize(db *gorm.DB) error {
 	s.DB = db
-	s.registerConnPool(db)
+	s.registerCallbacks(db)
 
 	for t, c := range s.configs {
 		if c.PrimaryKeyGenerator == PKPGSequence {
@@ -216,6 +216,20 @@ func (s *Sharding) Initialize(db *gorm.DB) error {
 	}
 
 	return s.compile()
+}
+
+func (s *Sharding) registerCallbacks(db *gorm.DB) {
+	s.Callback().Create().Before("*").Register("gorm:sharding", s.switchConn)
+	s.Callback().Query().Before("*").Register("gorm:sharding", s.switchConn)
+	s.Callback().Update().Before("*").Register("gorm:sharding", s.switchConn)
+	s.Callback().Delete().Before("*").Register("gorm:sharding", s.switchConn)
+	s.Callback().Row().Before("*").Register("gorm:sharding", s.switchConn)
+	s.Callback().Raw().Before("*").Register("gorm:sharding", s.switchConn)
+}
+
+func (s *Sharding) switchConn(db *gorm.DB) {
+	s.ConnPool = &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s}
+	db.Statement.ConnPool = s.ConnPool
 }
 
 // resolve split the old query to full table query and sharding table query
@@ -248,7 +262,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		}
 		table = tbl
 		condition = stmt.Condition
-
 	case *sqlparser.InsertStatement:
 		table = stmt.TableName
 		isInsert = true

@@ -14,19 +14,6 @@ type ConnPool struct {
 	gorm.ConnPool
 }
 
-// registerConnPool replace Gorm db.ConnPool as custom
-func (s *Sharding) registerConnPool(db *gorm.DB) {
-	// Avoid assign loop
-	basePool := db.ConnPool
-	if _, ok := basePool.(ConnPool); ok {
-		return
-	}
-
-	s.ConnPool = &ConnPool{ConnPool: basePool, sharding: s}
-	db.ConnPool = s.ConnPool
-	db.Statement.ConnPool = s.ConnPool
-}
-
 func (pool *ConnPool) String() string {
 	return "gorm:sharding:conn_pool"
 }

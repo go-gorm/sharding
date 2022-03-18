@@ -94,6 +94,31 @@ Recommend options:
 - [Snowflake](https://github.com/bwmarrin/snowflake)
 - [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
 
+## Combining with dbresolver
+
+> 🚨 NOTE: Use dbresolver first.
+
+```go
+dsn := "host=localhost user=gorm password=gorm dbname=gorm port=5432 sslmode=disable"
+dsnRead := "host=localhost user=gorm password=gorm dbname=gorm-slave port=5432 sslmode=disable"
+
+conn := postgres.Open(dsn)
+connRead := postgres.Open(dsnRead)
+
+db, err := gorm.Open(conn, &gorm.Config{})
+dbRead, err := gorm.Open(conn, &gorm.Config{})
+
+db.Use(dbresolver.Register(dbresolver.Config{
+  Replicas: []gorm.Dialector{dbRead.Dialector},
+}))
+
+db.Use(sharding.Register(sharding.Config{
+  ShardingKey:         "user_id",
+  NumberOfShards:      64,
+  PrimaryKeyGenerator: sharding.PKSnowflake,
+}))
+```
+
 ## Sharding process
 
 This graph show up how Gorm Sharding works.
