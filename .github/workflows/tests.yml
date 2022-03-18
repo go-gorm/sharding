@@ -76,6 +76,7 @@ jobs:
           MYSQL_USER: gorm
           MYSQL_PASSWORD: gorm
           MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+          MYSQL_HOST: mysql
         ports:
           - 3306:3306
         options: >-
@@ -98,10 +99,10 @@ jobs:
         id: go
 
       - name: Create Read Database
-        run: mysqladmin --host=localhost -ugorm -pgorm create sharding-read-test
+        run: mysqladmin -h mysql -ugorm -pgorm create sharding-read-test
 
       - name: Create Write Database
-        run: mysqladmin --host=localhost -ugorm -pgorm create sharding-write-test
+        run: mysqladmin -h mysql -ugorm -pgorm create sharding-write-test
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v1
