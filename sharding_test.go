@@ -326,9 +326,17 @@ func TestReadWriteSplitting(t *testing.T) {
 	dbRead.Exec("INSERT INTO orders_0 (id, product, user_id) VALUES(1, 'iPad', 100)")
 	dbWrite.Exec("INSERT INTO orders_0 (id, product, user_id) VALUES(1, 'iPad', 100)")
 
-	db, _ := gorm.Open(postgres.New(dbConfig), &gorm.Config{
-		DisableForeignKeyConstraintWhenMigrating: true,
-	})
+	var db *gorm.DB
+	if os.Getenv("DIALECTOR") == "mysql" {
+		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	} else {
+		db, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	}
+
 	db.Use(dbresolver.Register(dbresolver.Config{
 		Sources:  []gorm.Dialector{dbWrite.Dialector},
 		Replicas: []gorm.Dialector{dbRead.Dialector},
