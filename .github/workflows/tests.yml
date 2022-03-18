@@ -75,8 +75,7 @@ jobs:
           MYSQL_DATABASE: sharding-test
           MYSQL_USER: gorm
           MYSQL_PASSWORD: gorm
-          MYSQL_RANDOM_ROOT_PASSWORD: "yes"
-          MYSQL_HOST: mysql
+          MYSQL_ROOT_PASSWORD: gorm
         ports:
           - 3306:3306
         options: >-
@@ -89,8 +88,8 @@ jobs:
     env:
       DIALECTOR: mysql
       DATABASE_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4&parseTime=True&loc=Local
-      DATABASE_READ_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4&parseTime=True&loc=Local
-      DATABASE_WRITE_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4&parseTime=True&loc=Local
+      DATABASE_READ_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4&parseTime=True&loc=Local
+      DATABASE_WRITE_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4&parseTime=True&loc=Local
     steps:
       - name: Set up Go
         uses: actions/setup-go@v1
@@ -99,10 +98,12 @@ jobs:
         id: go
 
       - name: Create Read Database
-        run: mysqladmin -h 127.0.0.1 -ugorm -pgorm create sharding-read-test
+        run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-read-test
+        #run: mysql -e 'CREATE DATABASE sharding-read-test' -ugorm -pgorm
 
       - name: Create Write Database
-        run: mysqladmin -h 127.0.0.1 -ugorm -pgorm create sharding-write-test
+        run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-write-test
+        #run: mysql -e 'CREATE DATABASE sharding-write-test' -ugorm -pgorm
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v1
