@@ -98,10 +98,10 @@ jobs:
         id: go
 
       - name: Create Read Database
-        run: mysqladmin -hlocalhost -ugorm -pgorm create sharding-read-test
+        run: mysqladmin -h localhost -ugorm -pgorm create sharding-read-test
 
       - name: Create Write Database
-        run: mysqladmin -hlocalhost -ugorm -pgorm create sharding-write-test
+        run: mysqladmin -h localhost -ugorm -pgorm create sharding-write-test
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v1
