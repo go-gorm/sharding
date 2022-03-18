@@ -35,12 +35,20 @@ jobs:
     env:
       DIALECTOR: postgres
       DATABASE_URL: postgres://gorm:gorm@localhost:5432/sharding-test
+      DATABASE_READ_URL: postgres://gorm:gorm@localhost:5432/sharding-read-test
+      DATABASE_WRITE_URL: postgres://gorm:gorm@localhost:5432/sharding-write-test
     steps:
       - name: Set up Go
         uses: actions/setup-go@v1
         with:
           go-version: 1.17
         id: go
+
+      - name: Create Read Database
+        run: psql -U gorm -c 'CREATE DATABASE "sharding-read-test";'
+
+      - name: Create Write Databases
+        run: psql -U gorm -c 'CREATE DATABASE "sharding-write-test";'
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v1
@@ -80,12 +88,20 @@ jobs:
     env:
       DIALECTOR: mysql
       DATABASE_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4&parseTime=True&loc=Local
+      DATABASE_READ_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4&parseTime=True&loc=Local
+      DATABASE_WRITE_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4&parseTime=True&loc=Local
     steps:
       - name: Set up Go
         uses: actions/setup-go@v1
         with:
           go-version: 1.17
         id: go
+
+      - name: Create Read Database
+        run: mysqladmin -ugorm -pgorm create sharding-read-test
+
+      - name: Create Write Database
+        run: mysqladmin -ugorm -pgorm create sharding-write-test
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v1
