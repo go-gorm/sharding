@@ -19,7 +19,6 @@ import (
 
 var (
 	ErrMissingShardingKey = errors.New("sharding key or id required, and use operator =")
-	ErrInvalidID          = errors.New("invalid id format")
 )
 
 type Sharding struct {
@@ -230,44 +229,12 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		return
 	}
 
-	//expr, err := sqlparser.NewParser(strings.NewReader(query)).ParseStatement()
-	//if err != nil {
-	//	return ftQuery, stQuery, tableName, nil
-	//}
-
 	var leftTable *ast.TableName
 	//var rightTable *ast.TableName
 	var condition ast.ExprNode
 	var isInsert bool
 	var insertNames []*ast.ColumnName
 	var insertValues []ast.ExprNode
-
-	//switch stmt := expr.(type) {
-	//case *sqlparser.SelectStatement:
-	//	tbl, ok := stmt.FromItems.(*sqlparser.TableName)
-	//	if !ok {
-	//		return
-	//	}
-	//	if stmt.Hint != nil && stmt.Hint.Value == "nosharding" {
-	//		return
-	//	}
-	//	table = tbl
-	//	condition = stmt.Condition
-
-	//case *sqlparser.InsertStatement:
-	//	table = stmt.TableName
-	//	isInsert = true
-	//	insertNames = stmt.ColumnNames
-	//	insertValues = stmt.Expressions[0].Exprs
-	//case *sqlparser.UpdateStatement:
-	//	condition = stmt.Condition
-	//	table = stmt.TableName
-	//case *sqlparser.DeleteStatement:
-	//	condition = stmt.Condition
-	//	table = stmt.TableName
-	//default:
-	//	return ftQuery, stQuery, "", sqlparser.ErrNotImplemented
-	//}
 
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(query, "", "")
@@ -382,29 +349,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 	newTableName := tableName + suffix
 
-	//switch stmt := expr.(type) {
-	//case *sqlparser.InsertStatement:
-	//	ftQuery = stmt.String()
-	//	stmt.TableName = newTable
-	//	stQuery = stmt.String()
-	//case *sqlparser.SelectStatement:
-	//	ftQuery = stmt.String()
-	//	stmt.FromItems = newTable
-	//	stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
-	//	stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
-	//	stQuery = stmt.String()
-	//case *sqlparser.UpdateStatement:
-	//	ftQuery = stmt.String()
-	//	stmt.TableName = newTable
-	//	stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
-	//	stQuery = stmt.String()
-	//case *sqlparser.DeleteStatement:
-	//	ftQuery = stmt.String()
-	//	stmt.TableName = newTable
-	//	stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
-	//	stQuery = stmt.String()
-	//}
-
 	var buf bytes.Buffer
 	restoreCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &buf)
 
@@ -412,31 +356,26 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	case *ast.InsertStmt:
 		ftQuery = stmt.Text()
 		stmt.Table.TableRefs.Left = replaceTableSourceByTableName(stmt.Table.TableRefs.Left, tableName, newTableName)
-		if err := stmt.Restore(restoreCtx); err == nil {
-			stQuery = buf.String()
-		}
+		err = stmt.Restore(restoreCtx)
 	case *ast.SelectStmt:
 		ftQuery = stmt.Text()
 		stmt.From.TableRefs.Left = replaceTableSourceByTableName(stmt.From.TableRefs.Left, tableName, newTableName)
 		stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, leftTable.Name.L)
 		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
-		if err := stmt.Restore(restoreCtx); err == nil {
-			stQuery = buf.String()
-		}
+		err = stmt.Restore(restoreCtx)
 	case *ast.UpdateStmt:
 		ftQuery = stmt.Text()
 		stmt.TableRefs.TableRefs.Left = replaceTableSourceByTableName(stmt.TableRefs.TableRefs.Left, tableName, newTableName)
 		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
-		if err := stmt.Restore(restoreCtx); err == nil {
-			stQuery = buf.String()
-		}
+		err = stmt.Restore(restoreCtx)
 	case *ast.DeleteStmt:
 		ftQuery = stmt.Text()
 		stmt.TableRefs.TableRefs.Left = replaceTableSourceByTableName(stmt.TableRefs.TableRefs.Left, tableName, newTableName)
 		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
-		if err := stmt.Restore(restoreCtx); err == nil {
-			stQuery = buf.String()
-		}
+		err = stmt.Restore(restoreCtx)
+	}
+	if err == nil {
+		stQuery = buf.String()
 	}
 
 	return
