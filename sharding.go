@@ -302,7 +302,8 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		restoreCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &buf)
 		var needReplace bool
 		for _, tab := range tableNames {
-			r, ok := s.configs[tab.Name.String()]
+			tableName = tab.Name.String()
+			r, ok := s.configs[tableName]
 			if !ok {
 				continue
 			}
