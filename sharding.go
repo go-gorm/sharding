@@ -1,16 +1,21 @@
 package sharding
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"github.com/bwmarrin/snowflake"
+	"github.com/longbridgeapp/sqlparser"
+	"github.com/pingcap/parser"
+	"github.com/pingcap/parser/ast"
+	"github.com/pingcap/parser/format"
+	"github.com/pingcap/parser/opcode"
+	"github.com/pingcap/parser/test_driver"
+	"gorm.io/gorm"
 	"hash/crc32"
 	"strconv"
 	"strings"
 	"sync"
-
-	"github.com/bwmarrin/snowflake"
-	"github.com/longbridgeapp/sqlparser"
-	"gorm.io/gorm"
 )
 
 var (
@@ -226,45 +231,82 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		return
 	}
 
-	expr, err := sqlparser.NewParser(strings.NewReader(query)).ParseStatement()
-	if err != nil {
-		return ftQuery, stQuery, tableName, nil
-	}
+	//expr, err := sqlparser.NewParser(strings.NewReader(query)).ParseStatement()
+	//if err != nil {
+	//	return ftQuery, stQuery, tableName, nil
+	//}
 
-	var table *sqlparser.TableName
-	var condition sqlparser.Expr
+	var leftTable *ast.TableName
+	//var rightTable *ast.TableName
+	var condition ast.ExprNode
 	var isInsert bool
 	var insertNames []*sqlparser.Ident
 	var insertValues []sqlparser.Expr
 
-	switch stmt := expr.(type) {
-	case *sqlparser.SelectStatement:
-		tbl, ok := stmt.FromItems.(*sqlparser.TableName)
+	//switch stmt := expr.(type) {
+	//case *sqlparser.SelectStatement:
+	//	tbl, ok := stmt.FromItems.(*sqlparser.TableName)
+	//	if !ok {
+	//		return
+	//	}
+	//	if stmt.Hint != nil && stmt.Hint.Value == "nosharding" {
+	//		return
+	//	}
+	//	table = tbl
+	//	condition = stmt.Condition
+
+	//case *sqlparser.InsertStatement:
+	//	table = stmt.TableName
+	//	isInsert = true
+	//	insertNames = stmt.ColumnNames
+	//	insertValues = stmt.Expressions[0].Exprs
+	//case *sqlparser.UpdateStatement:
+	//	condition = stmt.Condition
+	//	table = stmt.TableName
+	//case *sqlparser.DeleteStatement:
+	//	condition = stmt.Condition
+	//	table = stmt.TableName
+	//default:
+	//	return ftQuery, stQuery, "", sqlparser.ErrNotImplemented
+	//}
+
+	p := parser.New()
+	stmtNodes, _, err := p.Parse(query, "", "")
+	if err != nil {
+		return ftQuery, stQuery, tableName, nil
+	}
+	switch stmt := stmtNodes[0].(type) {
+	case *ast.SelectStmt:
+		// Normal case
+		tblSource, ok := stmt.From.TableRefs.Left.(*ast.TableSource)
 		if !ok {
 			return
 		}
-		if stmt.Hint != nil && stmt.Hint.Value == "nosharding" {
+		leftTable, ok = tblSource.Source.(*ast.TableName)
+		if !ok {
 			return
 		}
-		table = tbl
-		condition = stmt.Condition
+		condition = stmt.Where
 
-	case *sqlparser.InsertStatement:
-		table = stmt.TableName
-		isInsert = true
-		insertNames = stmt.ColumnNames
-		insertValues = stmt.Expressions[0].Exprs
-	case *sqlparser.UpdateStatement:
-		condition = stmt.Condition
-		table = stmt.TableName
-	case *sqlparser.DeleteStatement:
-		condition = stmt.Condition
-		table = stmt.TableName
-	default:
-		return ftQuery, stQuery, "", sqlparser.ErrNotImplemented
+		// Join case
+		//if stmt.From.TableRefs.Right != nil {
+		//	tblSource, ok = stmt.From.TableRefs.Right.(*ast.TableSource)
+		//	if ok {
+		//		rightTable, ok = tblSource.Source.(*ast.TableName)
+		//		if !ok {
+		//			return
+		//		}
+		//	}
+		//}
+	case *ast.InsertStmt:
+	case *ast.UpdateStmt:
+	case *ast.DeleteStmt:
 	}
 
-	tableName = table.Name.Name
+	if leftTable == nil {
+		return
+	}
+	tableName = leftTable.Name.String()
 	r, ok := s.configs[tableName]
 	if !ok {
 		return
@@ -300,53 +342,57 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		suffix = r.ShardingAlgorithmByPrimaryKey(id)
 	}
 
-	newTable := &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
+	newTableName := tableName + suffix
 
-	//fillID := true
-	fillID := false // we don't want sharding fill the primary key
-	if isInsert {
-		for _, name := range insertNames {
-			if name.Name == "id" {
-				fillID = false
-				break
-			}
-		}
-		if fillID {
-			tblIdx, err := strconv.Atoi(strings.Replace(suffix, "_", "", 1))
-			if err != nil {
-				return ftQuery, stQuery, tableName, err
-			}
-			id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
-			insertNames = append(insertNames, &sqlparser.Ident{Name: "id"})
-			insertValues = append(insertValues, &sqlparser.NumberLit{Value: strconv.FormatInt(id, 10)})
-		}
-	}
+	//switch stmt := expr.(type) {
+	//case *sqlparser.InsertStatement:
+	//	ftQuery = stmt.String()
+	//	stmt.TableName = newTable
+	//	stQuery = stmt.String()
+	//case *sqlparser.SelectStatement:
+	//	ftQuery = stmt.String()
+	//	stmt.FromItems = newTable
+	//	stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
+	//	stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
+	//	stQuery = stmt.String()
+	//case *sqlparser.UpdateStatement:
+	//	ftQuery = stmt.String()
+	//	stmt.TableName = newTable
+	//	stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
+	//	stQuery = stmt.String()
+	//case *sqlparser.DeleteStatement:
+	//	ftQuery = stmt.String()
+	//	stmt.TableName = newTable
+	//	stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
+	//	stQuery = stmt.String()
+	//}
 
-	switch stmt := expr.(type) {
-	case *sqlparser.InsertStatement:
-		if fillID {
-			stmt.ColumnNames = insertNames
-			stmt.Expressions[0].Exprs = insertValues
+	var buf bytes.Buffer
+	restoreCtx := format.NewRestoreCtx(0, &buf)
+
+	switch stmt := stmtNodes[0].(type) {
+	case *ast.InsertStmt:
+		//ftQuery = stmt.String()
+		//stmt.TableName = newTable
+		//stQuery = stmt.String()
+	case *ast.SelectStmt:
+		ftQuery = stmt.Text()
+		stmt.From.TableRefs.Left = replaceTableSourceByTableName(stmt.From.TableRefs.Left, tableName, newTableName)
+		//stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, leftTable.Name.L)
+		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
+		if err := stmt.Restore(restoreCtx); err == nil {
+			stQuery = buf.String()
 		}
-		ftQuery = stmt.String()
-		stmt.TableName = newTable
-		stQuery = stmt.String()
-	case *sqlparser.SelectStatement:
-		ftQuery = stmt.String()
-		stmt.FromItems = newTable
-		stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
-		stmt.Condition = replaceConditionByTableName(stmt.Condition, tableName, newTable.Name.Name)
-		stQuery = stmt.String()
-	case *sqlparser.UpdateStatement:
-		ftQuery = stmt.String()
-		stmt.TableName = newTable
-		stmt.Condition = replaceConditionByTableName(stmt.Condition, tableName, newTable.Name.Name)
-		stQuery = stmt.String()
-	case *sqlparser.DeleteStatement:
-		ftQuery = stmt.String()
-		stmt.TableName = newTable
-		stmt.Condition = replaceConditionByTableName(stmt.Condition, tableName, newTable.Name.Name)
-		stQuery = stmt.String()
+	case *ast.UpdateStmt:
+		//ftQuery = stmt.String()
+		//stmt.TableName = newTable
+		//stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
+		//stQuery = stmt.String()
+	case *ast.DeleteStmt:
+		//ftQuery = stmt.String()
+		//stmt.TableName = newTable
+		//stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
+		//stQuery = stmt.String()
 	}
 
 	return
@@ -380,64 +426,74 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 	return
 }
 
-func (s *Sharding) nonInsertValue(key string, tableName string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
-	err = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
-		if n, ok := node.(*sqlparser.BinaryExpr); ok {
-			var x *sqlparser.Ident
-			if x1, ok := n.X.(*sqlparser.Ident); ok {
-				x = x1
-			} else if x2, ok := n.X.(*sqlparser.QualifiedRef); ok && x2.Table.Name == tableName {
-				x = x2.Column
-			} else {
-				return nil
-			}
+func (s *Sharding) nonInsertValue(key string, tableName string, condition ast.ExprNode, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
+	v := &conditionCol{}
+	condition.Accept(v)
 
-			if x.Name == key && n.Op == sqlparser.EQ {
+	for _, whereCon := range v.conditions {
+		if whereCon.columnName == key {
+			if whereCon.tableName != "" && whereCon.tableName != tableName {
+				continue
+			}
+			if whereCon.paramIndex != -1 {
 				keyFind = true
-				switch expr := n.Y.(type) {
-				case *sqlparser.BindExpr:
-					value = args[expr.Pos]
-				case *sqlparser.StringLit:
-					value = expr.Value
-				case *sqlparser.NumberLit:
-					value = expr.Value
-				default:
-					return sqlparser.ErrNotImplemented
-				}
-				return nil
-			} else if x.Name == "id" && n.Op == sqlparser.EQ {
-				switch expr := n.Y.(type) {
-				case *sqlparser.BindExpr:
-					v := args[expr.Pos]
-					var ok bool
-					if id, ok = v.(int64); !ok {
-						return fmt.Errorf("ID should be int64 type")
-					}
-				case *sqlparser.NumberLit:
-					id, err = strconv.ParseInt(expr.Value, 10, 64)
-					if err != nil {
-						return err
-					}
-				default:
-					return ErrInvalidID
-				}
-				return nil
+				value = whereCon.value
+			}else if whereCon.paramIndex < len(args) {
+				keyFind = true
+				value = args[whereCon.paramIndex]
+			}else{
+				return
 			}
-
 		}
-		return nil
-	}), condition)
-	if err != nil {
-		return
 	}
 
-	if !keyFind && id == 0 {
+	if !keyFind{
 		return nil, 0, keyFind, ErrMissingShardingKey
 	}
 
 	return
 }
 
+type conditionCol struct {
+	conditions []whereField
+	paramIndex int
+}
+
+type whereField struct {
+	tableName  string
+	columnName string
+	paramIndex int
+	value      interface{}
+}
+
+// 收集所有 EQ 操作的 Where 条件
+func (v *conditionCol) Enter(in ast.Node) (ast.Node, bool) {
+	if node, ok := in.(*ast.BinaryOperationExpr); ok {
+		if col, ok := node.L.(*ast.ColumnNameExpr); ok {
+			w := whereField{
+				tableName:  col.Name.Table.L,
+				columnName: col.Name.Name.L,
+				paramIndex: -1,
+			}
+
+			if _, ok := node.R.(*test_driver.ParamMarkerExpr); ok {
+				w.paramIndex = v.paramIndex
+				v.paramIndex++
+			} else if vNode, ok := node.R.(*test_driver.ValueExpr); ok {
+				w.value = vNode.Datum.GetValue()
+			}
+
+			if node.Op == opcode.EQ {
+				v.conditions = append(v.conditions, w)
+			}
+		}
+	}
+	return in, false
+}
+
+func (v *conditionCol) Leave(in ast.Node) (ast.Node, bool) {
+	return in, true
+}
 func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName string) []*sqlparser.OrderingTerm {
 	for i, term := range orderBy {
 		if x, ok := term.X.(*sqlparser.QualifiedRef); ok {
@@ -451,17 +507,55 @@ func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName
 	return orderBy
 }
 
-func replaceConditionByTableName(expr sqlparser.Expr, oldName, newName string) sqlparser.Expr {
-	n, ok := expr.(*sqlparser.BinaryExpr)
+func replaceWhereByTableName(expr ast.ExprNode, oldName, newName string) ast.ExprNode {
+	// DFS L & R until L is ast.ColumnNameExpr
+	n, ok := expr.(*ast.BinaryOperationExpr)
 	if ok {
-		x, ok := n.X.(*sqlparser.QualifiedRef)
-		if ok {
-			// is QualifiedRef
-			if x.Table.Name == oldName {
-				x.Table.Name = newName
-			}
-		}
+		replaceBinaryOperationExpr(n, oldName, newName)
 		return n
 	}
+	return expr
+}
+
+func replaceBinaryOperationExpr(expr *ast.BinaryOperationExpr, oldName, newName string) {
+	switch expr.L.(type) {
+	case *ast.BinaryOperationExpr:
+		// DFS
+		replaceBinaryOperationExpr(expr.L.(*ast.BinaryOperationExpr), oldName, newName)
+	case *ast.ColumnNameExpr:
+		replaceColumnNameExpr(expr.L.(*ast.ColumnNameExpr), oldName, newName)
+	}
+
+	switch expr.R.(type) {
+	case *ast.BinaryOperationExpr:
+		// DFS
+		replaceBinaryOperationExpr(expr.R.(*ast.BinaryOperationExpr), oldName, newName)
+	}
+}
+
+func replaceColumnNameExpr(expr *ast.ColumnNameExpr, oldName, newName string) {
+	if expr.Name.Table.L == oldName {
+		expr.Name.Table.L = newName
+	}
+	if strings.ToLower(expr.Name.Table.O) == oldName {
+		expr.Name.Table.O = newName
+	}
+}
+
+func replaceTableSourceByTableName(expr ast.ResultSetNode, oldName, newName string) ast.ResultSetNode {
+	n, ok := expr.(*ast.TableSource)
+	if ok {
+		tblName, ok := n.Source.(*ast.TableName)
+		if ok {
+			if tblName.Name.L == oldName {
+				tblName.Name.L = newName
+			}
+			if strings.ToLower(tblName.Name.O) == oldName {
+				tblName.Name.O = newName
+			}
+			return n
+		}
+	}
+
 	return expr
 }
