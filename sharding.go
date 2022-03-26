@@ -435,7 +435,7 @@ func (s *Sharding) nonInsertValue(key string, tableName string, condition ast.Ex
 			if whereCon.tableName != "" && whereCon.tableName != tableName {
 				continue
 			}
-			if whereCon.paramIndex != -1 {
+			if whereCon.paramIndex == -1 {
 				keyFind = true
 				value = whereCon.value
 			}else if whereCon.paramIndex < len(args) {
