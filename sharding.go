@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/bwmarrin/snowflake"
-	"github.com/longbridgeapp/sqlparser"
 	"github.com/pingcap/parser"
 	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/parser/format"
@@ -419,7 +418,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	case *ast.SelectStmt:
 		ftQuery = stmt.Text()
 		stmt.From.TableRefs.Left = replaceTableSourceByTableName(stmt.From.TableRefs.Left, tableName, newTableName)
-		//stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, leftTable.Name.L)
+		stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, leftTable.Name.L)
 		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
 		if err := stmt.Restore(restoreCtx); err == nil {
 			stQuery = buf.String()
@@ -472,10 +471,10 @@ func (s *Sharding) insertValue(key string, names []*ast.ColumnName, exprs []ast.
 			if insert.paramIndex == -1 {
 				keyFind = true
 				value = insert.value
-			}else if insert.paramIndex < len(args){
+			} else if insert.paramIndex < len(args) {
 				keyFind = true
 				value = args[insert.paramIndex]
-			}else{
+			} else {
 				return
 			}
 			keyFind = true
@@ -563,13 +562,10 @@ func (v *conditionCol) Enter(in ast.Node) (ast.Node, bool) {
 func (v *conditionCol) Leave(in ast.Node) (ast.Node, bool) {
 	return in, true
 }
-func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName string) []*sqlparser.OrderingTerm {
-	for i, term := range orderBy {
-		if x, ok := term.X.(*sqlparser.QualifiedRef); ok {
-			if x.Table.Name == oldName {
-				x.Table.Name = newName
-				orderBy[i].X = x
-			}
+func replaceOrderByTableName(orderBy []*ast.ByItem, oldName, newName string) []*ast.ByItem {
+	for i := range orderBy {
+		if _, ok := orderBy[i].Expr.(*ast.ColumnNameExpr); ok {
+			replaceColumnNameExpr(orderBy[i].Expr.(*ast.ColumnNameExpr), oldName, newName)
 		}
 	}
 
