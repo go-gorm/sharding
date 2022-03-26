@@ -240,8 +240,8 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	//var rightTable *ast.TableName
 	var condition ast.ExprNode
 	var isInsert bool
-	var insertNames []*sqlparser.Ident
-	var insertValues []sqlparser.Expr
+	var insertNames []*ast.ColumnName
+	var insertValues []ast.ExprNode
 
 	//switch stmt := expr.(type) {
 	//case *sqlparser.SelectStatement:
@@ -299,6 +299,21 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		//	}
 		//}
 	case *ast.InsertStmt:
+		tblSource, ok := stmt.Table.TableRefs.Left.(*ast.TableSource)
+		if !ok {
+			return
+		}
+		leftTable, ok = tblSource.Source.(*ast.TableName)
+		if !ok {
+			return
+		}
+
+		if len(stmt.Lists) != 1 {
+			return
+		}
+		insertValues = stmt.Lists[0]
+		insertNames = stmt.Columns
+
 	case *ast.UpdateStmt:
 		tblSource, ok := stmt.TableRefs.TableRefs.Left.(*ast.TableSource)
 		if !ok {
@@ -395,9 +410,8 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 	switch stmt := stmtNodes[0].(type) {
 	case *ast.InsertStmt:
-		//ftQuery = stmt.String()
-		//stmt.TableName = newTable
-		//stQuery = stmt.String()
+		ftQuery = stmt.Text()
+		stmt.Table.TableRefs.Left = replaceTableSourceByTableName(stmt.Table.TableRefs.Left, tableName, newTableName)
 	case *ast.SelectStmt:
 		ftQuery = stmt.Text()
 		stmt.From.TableRefs.Left = replaceTableSourceByTableName(stmt.From.TableRefs.Left, tableName, newTableName)
@@ -425,22 +439,40 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	return
 }
 
-func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
+func (s *Sharding) insertValue(key string, names []*ast.ColumnName, exprs []ast.ExprNode, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
 	if len(names) != len(exprs) {
 		return nil, 0, keyFind, errors.New("column names and expressions mismatch")
 	}
+	inserts := make([]insertField, 0, len(names))
+	paramIdx := 0
+	for i := range names {
+		insert := insertField{
+			columnName: names[i].Name.L,
+			paramIndex: -1,
+		}
 
-	for i, name := range names {
-		if name.Name == key {
-			switch expr := exprs[i].(type) {
-			case *sqlparser.BindExpr:
-				value = args[expr.Pos]
-			case *sqlparser.StringLit:
-				value = expr.Value
-			case *sqlparser.NumberLit:
-				value = expr.Value
-			default:
-				return nil, 0, keyFind, sqlparser.ErrNotImplemented
+		switch exprs[i].(type) {
+		case *test_driver.ParamMarkerExpr:
+			insert.paramIndex = paramIdx
+			paramIdx++
+		case *test_driver.ValueExpr:
+			insert.value = exprs[i].(*test_driver.ValueExpr).GetValue()
+		}
+
+		inserts = append(inserts, insert)
+
+	}
+
+	for _, insert := range inserts {
+		if insert.columnName == key {
+			if insert.paramIndex == -1 {
+				keyFind = true
+				value = insert.value
+			}else if insert.paramIndex < len(args){
+				keyFind = true
+				value = args[insert.paramIndex]
+			}else{
+				return
 			}
 			keyFind = true
 			break
@@ -484,6 +516,12 @@ func (s *Sharding) nonInsertValue(key string, tableName string, condition ast.Ex
 type conditionCol struct {
 	conditions []whereField
 	paramIndex int
+}
+
+type insertField struct {
+	columnName string
+	paramIndex int
+	value      interface{}
 }
 
 type whereField struct {
