@@ -645,7 +645,7 @@ func collectSelectTableName(stmt *ast.Join) ([]*ast.TableName, bool) {
 	case *ast.TableSource:
 		n, ok := stmt.Left.(*ast.TableSource).Source.(*ast.TableName)
 		if ok {
-			return []*ast.TableName{n}, true
+			result = append(result, n)
 		}
 	default:
 		return nil, false
@@ -655,7 +655,7 @@ func collectSelectTableName(stmt *ast.Join) ([]*ast.TableName, bool) {
 	case *ast.TableSource:
 		n, ok := stmt.Right.(*ast.TableSource).Source.(*ast.TableName)
 		if ok {
-			return []*ast.TableName{n}, true
+			result = append(result, n)
 		}
 	default:
 		return nil, false
