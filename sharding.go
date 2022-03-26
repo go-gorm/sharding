@@ -620,12 +620,12 @@ func replaceJoinByTableName(stmt *ast.Join, oldName, newName string) *ast.Join {
 	case *ast.Join:
 		stmt.Left = replaceJoinByTableName(stmt.Left.(*ast.Join), oldName, newName)
 	case *ast.TableSource:
-		stmt.Left.(*ast.TableSource).Source = replaceTableSourceByTableName(stmt.Left.(*ast.TableSource).Source, oldName, newName)
+		stmt.Left = replaceTableSourceByTableName(stmt.Left, oldName, newName)
 	}
 
 	switch stmt.Right.(type) {
 	case *ast.TableSource:
-		stmt.Right.(*ast.TableSource).Source = replaceTableSourceByTableName(stmt.Right.(*ast.TableSource).Source, oldName, newName)
+		stmt.Right = replaceTableSourceByTableName(stmt.Right, oldName, newName)
 	}
 
 	if on, ok := stmt.On.Expr.(*ast.BinaryOperationExpr); ok {
