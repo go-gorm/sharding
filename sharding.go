@@ -413,6 +413,9 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	case *ast.InsertStmt:
 		ftQuery = stmt.Text()
 		stmt.Table.TableRefs.Left = replaceTableSourceByTableName(stmt.Table.TableRefs.Left, tableName, newTableName)
+		if err := stmt.Restore(restoreCtx); err == nil {
+			stQuery = buf.String()
+		}
 	case *ast.SelectStmt:
 		ftQuery = stmt.Text()
 		stmt.From.TableRefs.Left = replaceTableSourceByTableName(stmt.From.TableRefs.Left, tableName, newTableName)
