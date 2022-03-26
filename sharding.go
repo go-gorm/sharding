@@ -308,8 +308,12 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		if !ok {
 			return
 		}
-		condition = stmt.Where
 
+		condition = stmt.Where
+		if len(stmt.List) > 0 {
+			placeHolderCnt := calculateArgsInUpdate(stmt.List)
+			args = args[placeHolderCnt:]
+		}
 	case *ast.DeleteStmt:
 		tblSource, ok := stmt.TableRefs.TableRefs.Left.(*ast.TableSource)
 		if !ok {
@@ -461,16 +465,16 @@ func (s *Sharding) nonInsertValue(key string, tableName string, condition ast.Ex
 			if whereCon.paramIndex == -1 {
 				keyFind = true
 				value = whereCon.value
-			}else if whereCon.paramIndex < len(args) {
+			} else if whereCon.paramIndex < len(args) {
 				keyFind = true
 				value = args[whereCon.paramIndex]
-			}else{
+			} else {
 				return
 			}
 		}
 	}
 
-	if !keyFind{
+	if !keyFind {
 		return nil, 0, keyFind, ErrMissingShardingKey
 	}
 
@@ -581,4 +585,14 @@ func replaceTableSourceByTableName(expr ast.ResultSetNode, oldName, newName stri
 	}
 
 	return expr
+}
+
+func calculateArgsInUpdate(assignments []*ast.Assignment) int {
+	cnt := 0
+	for _, ass := range assignments {
+		if _, ok := ass.Expr.(*test_driver.ParamMarkerExpr); ok {
+			cnt++
+		}
+	}
+	return cnt
 }
