@@ -331,7 +331,9 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			case *ast.SelectStmt:
 				// todo Replace table name in Fields
 				stmt.From.TableRefs = replaceJoinByTableName(stmt.From.TableRefs, tableName, newTableName)
-				stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, newTableName)
+				if stmt.OrderBy != nil {
+					stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, newTableName)
+				}
 				stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
 			default:
 				return
@@ -399,7 +401,9 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			// todo Replace table name in Fields
 			ftQuery = stmt.Text()
 			stmt.From.TableRefs.Left = replaceTableSourceByTableName(stmt.From.TableRefs.Left, tableName, newTableName)
-			stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, newTableName)
+			if stmt.OrderBy != nil {
+				stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, newTableName)
+			}
 			stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
 			err = stmt.Restore(restoreCtx)
 		case *ast.UpdateStmt:
