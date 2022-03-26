@@ -368,7 +368,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	//}
 
 	var buf bytes.Buffer
-	restoreCtx := format.NewRestoreCtx(0, &buf)
+	restoreCtx := format.NewRestoreCtx(format.RestoreStringWithoutCharset, &buf)
 
 	switch stmt := stmtNodes[0].(type) {
 	case *ast.InsertStmt:
