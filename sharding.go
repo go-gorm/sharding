@@ -230,7 +230,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	}
 
 	var leftTable *ast.TableName
-	//var rightTable *ast.TableName
+	var tableNames []*ast.TableName
 	var condition ast.ExprNode
 	var isInsert bool
 	var insertNames []*ast.ColumnName
@@ -243,27 +243,15 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	}
 	switch stmt := stmtNodes[0].(type) {
 	case *ast.SelectStmt:
-		// Normal case
-		tblSource, ok := stmt.From.TableRefs.Left.(*ast.TableSource)
+		var ok bool
+		tableNames, ok = collectSelectTableName(stmt.From.TableRefs)
 		if !ok {
 			return
 		}
-		leftTable, ok = tblSource.Source.(*ast.TableName)
-		if !ok {
-			return
+		if len(tableNames) == 1 {
+			leftTable = tableNames[0]
 		}
 		condition = stmt.Where
-
-		// Join case
-		//if stmt.From.TableRefs.Right != nil {
-		//	tblSource, ok = stmt.From.TableRefs.Right.(*ast.TableSource)
-		//	if ok {
-		//		rightTable, ok = tblSource.Source.(*ast.TableName)
-		//		if !ok {
-		//			return
-		//		}
-		//	}
-		//}
 	case *ast.InsertStmt:
 		isInsert = true
 		tblSource, ok := stmt.Table.TableRefs.Left.(*ast.TableSource)
@@ -308,76 +296,128 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		condition = stmt.Where
 	}
 
-	if leftTable == nil {
-		return
-	}
-	tableName = leftTable.Name.String()
-	r, ok := s.configs[tableName]
-	if !ok {
-		return
-	}
+	if len(tableNames) > 1 {
+		// select with join
+		var buf bytes.Buffer
+		restoreCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &buf)
+		var needReplace bool
+		for _, tab := range tableNames {
+			r, ok := s.configs[tab.Name.String()]
+			if !ok {
+				continue
+			}
 
-	var value interface{}
-	var id int64
-	var keyFind bool
-	if isInsert {
-		value, id, keyFind, err = s.insertValue(r.ShardingKey, insertNames, insertValues, args...)
-		if err != nil {
+			needReplace = true
+
+			var value interface{}
+			var keyFind bool
+			value, _, keyFind, err = s.nonInsertValue(r.ShardingKey, tableName, condition, args...)
+			if err != nil {
+				return
+			}
+
+			var suffix string
+
+			if keyFind {
+				suffix, err = r.ShardingAlgorithm(value)
+				if err != nil {
+					return
+				}
+			}
+
+			newTableName := tableName + suffix
+
+			switch stmt := stmtNodes[0].(type) {
+			case *ast.SelectStmt:
+				// todo Replace table name in Fields
+				stmt.From.TableRefs = replaceJoinByTableName(stmt.From.TableRefs, tableName, newTableName)
+				stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, newTableName)
+				stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
+			default:
+				return
+			}
+		}
+		if !needReplace {
 			return
+		}
+		ftQuery = stmtNodes[0].Text()
+		err = stmtNodes[0].Restore(restoreCtx)
+		if err == nil {
+			stQuery = buf.String()
 		}
 	} else {
-		value, id, keyFind, err = s.nonInsertValue(r.ShardingKey, tableName, condition, args...)
-		if err != nil {
+		if leftTable == nil {
 			return
 		}
-	}
-
-	var suffix string
-
-	if keyFind {
-		suffix, err = r.ShardingAlgorithm(value)
-		if err != nil {
+		tableName = leftTable.Name.String()
+		r, ok := s.configs[tableName]
+		if !ok {
 			return
 		}
-	} else {
-		if r.ShardingAlgorithmByPrimaryKey == nil {
-			err = fmt.Errorf("there is not sharding key and ShardingAlgorithmByPrimaryKey is not configured")
-			return
+
+		var value interface{}
+		var id int64
+		var keyFind bool
+		if isInsert {
+			value, id, keyFind, err = s.insertValue(r.ShardingKey, insertNames, insertValues, args...)
+			if err != nil {
+				return
+			}
+		} else {
+			value, id, keyFind, err = s.nonInsertValue(r.ShardingKey, tableName, condition, args...)
+			if err != nil {
+				return
+			}
 		}
-		suffix = r.ShardingAlgorithmByPrimaryKey(id)
+
+		var suffix string
+
+		if keyFind {
+			suffix, err = r.ShardingAlgorithm(value)
+			if err != nil {
+				return
+			}
+		} else {
+			if r.ShardingAlgorithmByPrimaryKey == nil {
+				err = fmt.Errorf("there is not sharding key and ShardingAlgorithmByPrimaryKey is not configured")
+				return
+			}
+			suffix = r.ShardingAlgorithmByPrimaryKey(id)
+		}
+
+		newTableName := tableName + suffix
+
+		var buf bytes.Buffer
+		restoreCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &buf)
+
+		switch stmt := stmtNodes[0].(type) {
+		case *ast.InsertStmt:
+			ftQuery = stmt.Text()
+			stmt.Table.TableRefs.Left = replaceTableSourceByTableName(stmt.Table.TableRefs.Left, tableName, newTableName)
+			err = stmt.Restore(restoreCtx)
+		case *ast.SelectStmt:
+			// todo Replace table name in Fields
+			ftQuery = stmt.Text()
+			stmt.From.TableRefs.Left = replaceTableSourceByTableName(stmt.From.TableRefs.Left, tableName, newTableName)
+			stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, newTableName)
+			stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
+			err = stmt.Restore(restoreCtx)
+		case *ast.UpdateStmt:
+			ftQuery = stmt.Text()
+			stmt.TableRefs.TableRefs.Left = replaceTableSourceByTableName(stmt.TableRefs.TableRefs.Left, tableName, newTableName)
+			stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
+			err = stmt.Restore(restoreCtx)
+		case *ast.DeleteStmt:
+			ftQuery = stmt.Text()
+			stmt.TableRefs.TableRefs.Left = replaceTableSourceByTableName(stmt.TableRefs.TableRefs.Left, tableName, newTableName)
+			stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
+			err = stmt.Restore(restoreCtx)
+		}
+		if err == nil {
+			stQuery = buf.String()
+		}
+		return
 	}
-
-	newTableName := tableName + suffix
-
-	var buf bytes.Buffer
-	restoreCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &buf)
-
-	switch stmt := stmtNodes[0].(type) {
-	case *ast.InsertStmt:
-		ftQuery = stmt.Text()
-		stmt.Table.TableRefs.Left = replaceTableSourceByTableName(stmt.Table.TableRefs.Left, tableName, newTableName)
-		err = stmt.Restore(restoreCtx)
-	case *ast.SelectStmt:
-		ftQuery = stmt.Text()
-		stmt.From.TableRefs.Left = replaceTableSourceByTableName(stmt.From.TableRefs.Left, tableName, newTableName)
-		stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, leftTable.Name.L)
-		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
-		err = stmt.Restore(restoreCtx)
-	case *ast.UpdateStmt:
-		ftQuery = stmt.Text()
-		stmt.TableRefs.TableRefs.Left = replaceTableSourceByTableName(stmt.TableRefs.TableRefs.Left, tableName, newTableName)
-		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
-		err = stmt.Restore(restoreCtx)
-	case *ast.DeleteStmt:
-		ftQuery = stmt.Text()
-		stmt.TableRefs.TableRefs.Left = replaceTableSourceByTableName(stmt.TableRefs.TableRefs.Left, tableName, newTableName)
-		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
-		err = stmt.Restore(restoreCtx)
-	}
-	if err == nil {
-		stQuery = buf.String()
-	}
-
 	return
 }
 
@@ -501,6 +541,7 @@ func (v *conditionCol) Enter(in ast.Node) (ast.Node, bool) {
 func (v *conditionCol) Leave(in ast.Node) (ast.Node, bool) {
 	return in, true
 }
+
 func replaceOrderByTableName(orderBy []*ast.ByItem, oldName, newName string) []*ast.ByItem {
 	for i := range orderBy {
 		if _, ok := orderBy[i].Expr.(*ast.ColumnNameExpr); ok {
@@ -564,6 +605,21 @@ func replaceTableSourceByTableName(expr ast.ResultSetNode, oldName, newName stri
 	return expr
 }
 
+func replaceJoinByTableName(stmt *ast.Join, oldName, newName string) *ast.Join {
+	switch stmt.Left.(type) {
+	case *ast.Join:
+		stmt.Left = replaceJoinByTableName(stmt.Left.(*ast.Join), oldName, newName)
+	case *ast.TableSource:
+		stmt.Left.(*ast.TableSource).Source = replaceTableSourceByTableName(stmt.Left.(*ast.TableSource).Source, oldName, newName)
+	}
+
+	switch stmt.Right.(type) {
+	case *ast.TableSource:
+		stmt.Right.(*ast.TableSource).Source = replaceTableSourceByTableName(stmt.Right.(*ast.TableSource).Source, oldName, newName)
+	}
+	return stmt
+}
+
 func calculateArgsInUpdate(assignments []*ast.Assignment) int {
 	cnt := 0
 	for _, ass := range assignments {
@@ -572,4 +628,33 @@ func calculateArgsInUpdate(assignments []*ast.Assignment) int {
 		}
 	}
 	return cnt
+}
+
+func collectSelectTableName(stmt *ast.Join) ([]*ast.TableName, bool) {
+	var result []*ast.TableName
+	switch stmt.Left.(type) {
+	case *ast.Join:
+		t, ok := collectSelectTableName(stmt.Left.(*ast.Join))
+		if ok == true {
+			result = append(result, t...)
+		}
+	case *ast.TableSource:
+		n, ok := stmt.Left.(*ast.TableSource).Source.(*ast.TableName)
+		if ok {
+			return []*ast.TableName{n}, true
+		}
+	default:
+		return nil, false
+	}
+
+	switch stmt.Right.(type) {
+	case *ast.TableSource:
+		n, ok := stmt.Right.(*ast.TableSource).Source.(*ast.TableName)
+		if ok {
+			return []*ast.TableName{n}, true
+		}
+	default:
+		return nil, false
+	}
+	return result, true
 }
