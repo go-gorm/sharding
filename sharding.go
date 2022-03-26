@@ -299,6 +299,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		//	}
 		//}
 	case *ast.InsertStmt:
+		isInsert = true
 		tblSource, ok := stmt.Table.TableRefs.Left.(*ast.TableSource)
 		if !ok {
 			return
