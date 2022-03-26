@@ -330,10 +330,13 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 			switch stmt := stmtNodes[0].(type) {
 			case *ast.SelectStmt:
-				// todo Replace table name in Fields
+
 				stmt.From.TableRefs = replaceJoinByTableName(stmt.From.TableRefs, tableName, newTableName)
 				if stmt.OrderBy != nil {
 					stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, newTableName)
+				}
+				if stmt.Fields != nil {
+					stmt.Fields.Fields = replaceSelectFieldByTableName(stmt.Fields.Fields, tableName, newTableName)
 				}
 				stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
 			default:
@@ -399,11 +402,13 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			stmt.Table.TableRefs.Left = replaceTableSourceByTableName(stmt.Table.TableRefs.Left, tableName, newTableName)
 			err = stmt.Restore(restoreCtx)
 		case *ast.SelectStmt:
-			// todo Replace table name in Fields
 			ftQuery = stmt.Text()
 			stmt.From.TableRefs.Left = replaceTableSourceByTableName(stmt.From.TableRefs.Left, tableName, newTableName)
 			if stmt.OrderBy != nil {
 				stmt.OrderBy.Items = replaceOrderByTableName(stmt.OrderBy.Items, tableName, newTableName)
+			}
+			if stmt.Fields != nil {
+				stmt.Fields.Fields = replaceSelectFieldByTableName(stmt.Fields.Fields, tableName, newTableName)
 			}
 			stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
 			err = stmt.Restore(restoreCtx)
@@ -621,6 +626,30 @@ func replaceJoinByTableName(stmt *ast.Join, oldName, newName string) *ast.Join {
 	switch stmt.Right.(type) {
 	case *ast.TableSource:
 		stmt.Right.(*ast.TableSource).Source = replaceTableSourceByTableName(stmt.Right.(*ast.TableSource).Source, oldName, newName)
+	}
+
+	if on, ok := stmt.On.Expr.(*ast.BinaryOperationExpr); ok {
+		if _, ok = on.L.(*ast.ColumnNameExpr); ok {
+			replaceColumnNameExpr(on.L.(*ast.ColumnNameExpr), oldName, newName)
+		}
+		if _, ok = on.R.(*ast.ColumnNameExpr); ok {
+			replaceColumnNameExpr(on.R.(*ast.ColumnNameExpr), oldName, newName)
+		}
+	}
+
+	return stmt
+}
+
+func replaceSelectFieldByTableName(stmt []*ast.SelectField, oldName, newName string) []*ast.SelectField {
+	if len(stmt) < 1 {
+		return stmt
+	}
+
+	for _, n := range stmt {
+		_, ok := n.Expr.(*ast.ColumnNameExpr)
+		if ok {
+			replaceColumnNameExpr(n.Expr.(*ast.ColumnNameExpr), oldName, newName)
+		}
 	}
 	return stmt
 }
