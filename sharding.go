@@ -300,7 +300,26 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		//}
 	case *ast.InsertStmt:
 	case *ast.UpdateStmt:
+		tblSource, ok := stmt.TableRefs.TableRefs.Left.(*ast.TableSource)
+		if !ok {
+			return
+		}
+		leftTable, ok = tblSource.Source.(*ast.TableName)
+		if !ok {
+			return
+		}
+		condition = stmt.Where
+
 	case *ast.DeleteStmt:
+		tblSource, ok := stmt.TableRefs.TableRefs.Left.(*ast.TableSource)
+		if !ok {
+			return
+		}
+		leftTable, ok = tblSource.Source.(*ast.TableName)
+		if !ok {
+			return
+		}
+		condition = stmt.Where
 	}
 
 	if leftTable == nil {
@@ -384,15 +403,19 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			stQuery = buf.String()
 		}
 	case *ast.UpdateStmt:
-		//ftQuery = stmt.String()
-		//stmt.TableName = newTable
-		//stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
-		//stQuery = stmt.String()
+		ftQuery = stmt.Text()
+		stmt.TableRefs.TableRefs.Left = replaceTableSourceByTableName(stmt.TableRefs.TableRefs.Left, tableName, newTableName)
+		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
+		if err := stmt.Restore(restoreCtx); err == nil {
+			stQuery = buf.String()
+		}
 	case *ast.DeleteStmt:
-		//ftQuery = stmt.String()
-		//stmt.TableName = newTable
-		//stmt.Condition = replaceWhereByTableName(stmt.Condition, tableName, newTable.Name.Name)
-		//stQuery = stmt.String()
+		ftQuery = stmt.Text()
+		stmt.TableRefs.TableRefs.Left = replaceTableSourceByTableName(stmt.TableRefs.TableRefs.Left, tableName, newTableName)
+		stmt.Where = replaceWhereByTableName(stmt.Where, tableName, newTableName)
+		if err := stmt.Restore(restoreCtx); err == nil {
+			stQuery = buf.String()
+		}
 	}
 
 	return
