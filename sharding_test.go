@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -149,6 +150,20 @@ func dropTables() {
 		dbWrite.Exec("DROP TABLE IF EXISTS " + table)
 		db.Exec(("DROP SEQUENCE IF EXISTS gorm_sharding_" + table + "_id_seq"))
 	}
+}
+
+func TestAutoMigrate(t *testing.T) {
+	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
+	for _, table := range targetTables {
+		db.Exec("DROP TABLE IF EXISTS " + table)
+		db.Exec(("DROP SEQUENCE IF EXISTS gorm_sharding_" + table + "_id_seq"))
+	}
+
+	db.AutoMigrate(&Order{}, &Category{})
+	tables, _ := db.Migrator().GetTables()
+	sort.Strings(tables)
+	sort.Strings(targetTables)
+	assert.Equal(t, tables, targetTables)
 }
 
 func TestInsert(t *testing.T) {
