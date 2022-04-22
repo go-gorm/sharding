@@ -152,7 +152,7 @@ func dropTables() {
 	}
 }
 
-func TestAutoMirg(t *testing.T) {
+func TestAutoMigrate(t *testing.T) {
 	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
 	for _, table := range targetTables {
 		db.Exec("DROP TABLE IF EXISTS " + table)
