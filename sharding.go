@@ -56,6 +56,19 @@ type Config struct {
 	// 	}
 	ShardingAlgorithm func(columnValue interface{}) (suffix string, err error)
 
+	// ShardingSuffixs specifies a function to generate all table's suffix.
+	// Used to support Migrator.
+	// For example, this function get a mod all sharding suffixs.
+	//
+	// func () (suffixs []string) {
+	// 	numberOfShards := 5
+	// 	for i := 0; i < numberOfShards; i++ {
+	// 		suffixs = append(suffixs, fmt.Sprintf("_%02d", i%numberOfShards))
+	// 	}
+	// 	return
+	// }
+	ShardingSuffixs func() (suffixs []string)
+
 	// ShardingAlgorithmByPrimaryKey specifies a function to generate the sharding
 	// table's suffix by the primary key. Used when no sharding key specified.
 	// For example, this function use the Snowflake library to generate the suffix.
@@ -160,7 +173,21 @@ func (s *Sharding) compile() error {
 					return "", fmt.Errorf("default algorithm only support integer and string column," +
 						"if you use other type, specify you own ShardingAlgorithm")
 				}
+
 				return fmt.Sprintf(c.tableFormat, id%int(c.NumberOfShards)), nil
+			}
+		}
+
+		if c.ShardingSuffixs == nil {
+			c.ShardingSuffixs = func() (suffixs []string) {
+				for i := 0; i < int(c.NumberOfShards); i++ {
+					suffix, err := c.ShardingAlgorithm(i)
+					if err != nil {
+						return nil
+					}
+					suffixs = append(suffixs, suffix)
+				}
+				return
 			}
 		}
 
@@ -193,6 +220,7 @@ func (s *Sharding) LastQuery() string {
 
 // Initialize implement for Gorm plugin interface
 func (s *Sharding) Initialize(db *gorm.DB) error {
+	db.Dialector = NewShardingDialector(db.Dialector, s)
 	s.DB = db
 	s.registerCallbacks(db)
 

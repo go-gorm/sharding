@@ -1,5 +1,11 @@
 name: Tests
-on: [push]
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+  pull_request:
 jobs:
   postgres:
     strategy:
