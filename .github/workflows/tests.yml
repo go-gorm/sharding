@@ -57,7 +57,7 @@ jobs:
         run: PGPASSWORD=gorm psql -h localhost -U gorm -d sharding-test -c 'CREATE DATABASE "sharding-write-test";'
 
       - name: Check out code into the Go module directory
-        uses: actions/checkout@v1
+        uses: actions/checkout@v3
 
       - name: Get dependencies
         run: |
@@ -112,7 +112,7 @@ jobs:
         #run: mysql -e 'CREATE DATABASE sharding-write-test' -ugorm -pgorm
 
       - name: Check out code into the Go module directory
-        uses: actions/checkout@v1
+        uses: actions/checkout@v3
 
       - name: Get dependencies
         run: |
