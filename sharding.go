@@ -96,8 +96,7 @@ func (s *Sharding) compile() error {
 		if t, ok := table.(string); ok {
 			s.configs[t] = s._config
 		} else {
-			// stmt := &gorm.Statement{DB: s.DB}
-			stmt := s.DB.Statement
+			stmt := &gorm.Statement{DB: s.DB}
 			if err := stmt.Parse(table); err == nil {
 				s.configs[stmt.Table] = s._config
 			} else {
