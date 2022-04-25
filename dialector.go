@@ -34,34 +34,18 @@ func (d ShardingDialector) Migrator(db *gorm.DB) gorm.Migrator {
 }
 
 func (m ShardingMigrator) AutoMigrate(dst ...interface{}) error {
-	noShardingDsts := make([]interface{}, 0)
-	for _, model := range dst {
-		stmt := &gorm.Statement{DB: m.sharding.DB}
-		if err := stmt.Parse(model); err == nil {
-			if cfg, ok := m.sharding.configs[stmt.Table]; ok {
-				// support sharding table
-				suffixs := cfg.ShardingSuffixs()
-				if len(suffixs) == 0 {
-					return fmt.Errorf("sharding table:%s suffixs is empty", stmt.Table)
-				}
+	shardingDsts, noShardingDsts, err := m.splitShardingDsts(dst...)
+	if err != nil {
+		return err
+	}
 
-				for _, suffix := range suffixs {
-					shardingTable := stmt.Table + suffix
-					tx := stmt.DB.Session(&gorm.Session{}).Table(shardingTable)
-					if err := m.dialector.Migrator(tx).AutoMigrate(model); err != nil {
-						return err
-					}
-				}
-
-				if cfg.DoubleWrite {
-					noShardingDsts = append(noShardingDsts, model)
-				}
-			} else {
-				noShardingDsts = append(noShardingDsts, model)
-			}
-		} else {
+	stmt := &gorm.Statement{DB: m.sharding.DB}
+	for _, sd := range shardingDsts {
+		tx := stmt.DB.Session(&gorm.Session{}).Table(sd.table)
+		if err := m.dialector.Migrator(tx).AutoMigrate(sd.dst); err != nil {
 			return err
 		}
+
 	}
 
 	if len(noShardingDsts) > 0 {
@@ -69,9 +53,71 @@ func (m ShardingMigrator) AutoMigrate(dst ...interface{}) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
-// TODO: DropTable drop sharding table
-// func (m ShardingMigrator) DropTable(dst ...interface{}) error {
-// }
+func (m ShardingMigrator) DropTable(dst ...interface{}) error {
+	shardingDsts, noShardingDsts, err := m.splitShardingDsts(dst...)
+	if err != nil {
+		return err
+	}
+
+	for _, sd := range shardingDsts {
+		if err := m.Migrator.DropTable(sd.table); err != nil {
+			return err
+		}
+	}
+
+	if len(noShardingDsts) > 0 {
+		if err := m.Migrator.DropTable(noShardingDsts...); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+type shardingDst struct {
+	table string
+	dst   interface{}
+}
+
+// splite sharding or normal dsts
+func (m ShardingMigrator) splitShardingDsts(dsts ...interface{}) (shardingDsts []shardingDst,
+	noShardingDsts []interface{}, err error) {
+
+	shardingDsts = make([]shardingDst, 0)
+	noShardingDsts = make([]interface{}, 0)
+	for _, model := range dsts {
+		stmt := &gorm.Statement{DB: m.sharding.DB}
+		err = stmt.Parse(model)
+		if err != nil {
+			return
+		}
+
+		if cfg, ok := m.sharding.configs[stmt.Table]; ok {
+			// support sharding table
+			suffixs := cfg.ShardingSuffixs()
+			if len(suffixs) == 0 {
+				err = fmt.Errorf("sharding table:%s suffixs is empty", stmt.Table)
+				return
+			}
+
+			for _, suffix := range suffixs {
+				shardingTable := stmt.Table + suffix
+				shardingDsts = append(shardingDsts, shardingDst{
+					table: shardingTable,
+					dst:   model,
+				})
+			}
+
+			if cfg.DoubleWrite {
+				noShardingDsts = append(noShardingDsts, model)
+			}
+		} else {
+			noShardingDsts = append(noShardingDsts, model)
+		}
+	}
+	return
+}
