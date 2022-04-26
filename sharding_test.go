@@ -152,17 +152,24 @@ func dropTables() {
 	}
 }
 
-func TestAutoMigrate(t *testing.T) {
+func TestMigrate(t *testing.T) {
 	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
-	for _, table := range targetTables {
-		db.Exec("DROP TABLE IF EXISTS " + table)
-		db.Exec(("DROP SEQUENCE IF EXISTS gorm_sharding_" + table + "_id_seq"))
-	}
+	sort.Strings(targetTables)
 
-	db.AutoMigrate(&Order{}, &Category{})
+	// origin tables
 	tables, _ := db.Migrator().GetTables()
 	sort.Strings(tables)
-	sort.Strings(targetTables)
+	assert.Equal(t, tables, targetTables)
+
+	// drop table
+	db.Migrator().DropTable(Order{}, &Category{})
+	tables, _ = db.Migrator().GetTables()
+	assert.Equal(t, len(tables), 0)
+
+	// auto migrate
+	db.AutoMigrate(&Order{}, &Category{})
+	tables, _ = db.Migrator().GetTables()
+	sort.Strings(tables)
 	assert.Equal(t, tables, targetTables)
 }
 
