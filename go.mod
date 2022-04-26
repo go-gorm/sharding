@@ -8,7 +8,7 @@ require (
 	github.com/longbridgeapp/sqlparser v0.3.1
 	gorm.io/driver/mysql v1.3.2
 	gorm.io/driver/postgres v1.3.1
-	gorm.io/gorm v1.23.2
+	gorm.io/gorm v1.23.4
 	gorm.io/hints v1.1.0
 	gorm.io/plugin/dbresolver v1.1.0
 )
