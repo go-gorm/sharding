@@ -18,6 +18,10 @@ var (
 	ErrInvalidID          = errors.New("invalid id format")
 )
 
+var (
+	ShardingIgnoreStoreKey = "sharding_ignore"
+)
+
 type Sharding struct {
 	*gorm.DB
 	ConnPool       *ConnPool
@@ -255,8 +259,13 @@ func (s *Sharding) registerCallbacks(db *gorm.DB) {
 }
 
 func (s *Sharding) switchConn(db *gorm.DB) {
-	s.ConnPool = &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s}
-	db.Statement.ConnPool = s.ConnPool
+	// Support ignore sharding in some case, like:
+	// When DoubleWrite is enabled, we need to query database schema
+	// information by table name during the migration.
+	if _, ok := db.Get(ShardingIgnoreStoreKey); !ok {
+		s.ConnPool = &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s}
+		db.Statement.ConnPool = s.ConnPool
+	}
 }
 
 // resolve split the old query to full table query and sharding table query
