@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bwmarrin/snowflake"
@@ -375,6 +376,27 @@ func TestReadWriteSplitting(t *testing.T) {
 
 	dbWrite.Table("orders_0").Where("user_id", 100).Find(&order)
 	assert.Equal(t, "iPhone", order.Product)
+}
+
+func TestTraceSQL(t *testing.T) {
+	tx := db.Session(&gorm.Session{NewDB: true})
+	// we can set mode to view logs
+	// tx.Logger = tx.Logger.LogMode(logger.Info)
+
+	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES`
+
+	wg := sync.WaitGroup{}
+	var mockSql string
+	tx.Callback().Create().After("gorm:sharding:mocksql").Register("gorm:TestTraceSQL", func(d *gorm.DB) {
+		mockSql = d.Statement.SQL.String()
+		tx.Callback().Create().Remove("gorm:TestTraceSQL")
+		wg.Done()
+	})
+
+	wg.Add(1)
+	tx.Create(&Order{UserID: 1000, Product: "TestTraceSQL"})
+	wg.Wait()
+	assert.Equal(t, expected, mockSql[0:len(expected)])
 }
 
 func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {

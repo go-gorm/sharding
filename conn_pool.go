@@ -3,6 +3,7 @@ package sharding
 import (
 	"context"
 	"database/sql"
+	"sync"
 
 	"gorm.io/gorm"
 )
@@ -12,6 +13,7 @@ type ConnPool struct {
 	// db, This is global db instance
 	sharding *Sharding
 	gorm.ConnPool
+	settings *sync.Map
 }
 
 func (pool *ConnPool) String() string {
@@ -29,6 +31,7 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...inte
 	}
 
 	pool.sharding.querys.Store("last_query", stQuery)
+	pool.settings.Store(ShardingQueryStoreKey, stQuery)
 
 	if table != "" {
 		if r, ok := pool.sharding.configs[table]; ok {
@@ -49,6 +52,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...int
 	}
 
 	pool.sharding.querys.Store("last_query", stQuery)
+	pool.settings.Store(ShardingQueryStoreKey, stQuery)
 
 	if table != "" {
 		if r, ok := pool.sharding.configs[table]; ok {
@@ -64,6 +68,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...int
 func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
 	_, query, _, _ = pool.sharding.resolve(query, args...)
 	pool.sharding.querys.Store("last_query", query)
+	pool.settings.Store(ShardingQueryStoreKey, query)
 
 	return pool.ConnPool.QueryRowContext(ctx, query, args...)
 }
