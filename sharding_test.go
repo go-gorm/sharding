@@ -378,7 +378,7 @@ func TestReadWriteSplitting(t *testing.T) {
 	assert.Equal(t, "iPhone", order.Product)
 }
 
-func TestTraceSQL(t *testing.T) {
+func TestTraceSqlLog(t *testing.T) {
 	tx := db.Session(&gorm.Session{NewDB: true})
 	// we can set mode to view logs
 	// tx.Logger = tx.Logger.LogMode(logger.Info)
