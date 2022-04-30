@@ -360,11 +360,13 @@ func TestReadWriteSplitting(t *testing.T) {
 		})
 	}
 
+	// plugin register order
+	// https://github.com/go-gorm/gorm/pull/5304
+	db.Use(middleware)
 	db.Use(dbresolver.Register(dbresolver.Config{
 		Sources:  []gorm.Dialector{dbWrite.Dialector},
 		Replicas: []gorm.Dialector{dbRead.Dialector},
 	}))
-	db.Use(middleware)
 
 	var order Order
 	db.Model(&Order{}).Where("user_id", 100).Find(&order)
