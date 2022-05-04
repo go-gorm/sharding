@@ -171,6 +171,10 @@ func TestMigrate(t *testing.T) {
 	tables, _ = db.Migrator().GetTables()
 	sort.Strings(tables)
 	assert.Equal(t, tables, targetTables)
+
+	// auto migrate again
+	err := db.AutoMigrate(&Order{}, &Category{})
+	assert.Equal(t, err, nil)
 }
 
 func TestInsert(t *testing.T) {
