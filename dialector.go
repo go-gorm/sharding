@@ -49,7 +49,11 @@ func (m ShardingMigrator) AutoMigrate(dst ...interface{}) error {
 	}
 
 	if len(noShardingDsts) > 0 {
-		if err := m.Migrator.AutoMigrate(noShardingDsts...); err != nil {
+		tx := stmt.DB.Session(&gorm.Session{})
+		tx.Statement.Settings.Store(ShardingIgnoreStoreKey, nil)
+		defer tx.Statement.Settings.Delete(ShardingIgnoreStoreKey)
+
+		if err := m.dialector.Migrator(tx).AutoMigrate(noShardingDsts...); err != nil {
 			return err
 		}
 	}
