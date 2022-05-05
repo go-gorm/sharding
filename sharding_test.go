@@ -308,6 +308,7 @@ func TestNoSharding(t *testing.T) {
 }
 
 func TestPKSnowflake(t *testing.T) {
+	var db *gorm.DB
 	if os.Getenv("DIALECTOR") == "mysql" {
 		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
