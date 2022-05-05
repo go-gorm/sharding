@@ -387,6 +387,16 @@ func TestReadWriteSplitting(t *testing.T) {
 	assert.Equal(t, "iPhone", order.Product)
 }
 
+func TestSelectAlias(t *testing.T) {
+	sql := toDialect(`SELECT * FROM "orders" WHERE orders.user_id = 101`)
+	tx := db.Raw(sql).Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 AS orders WHERE orders.user_id = 101`, tx)
+
+	sql1 := toDialect(`SELECT * FROM "orders" AS "o" WHERE o.user_id = 101`)
+	tx1 := db.Raw(sql1).Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 AS o WHERE o.user_id = 101`, tx1)
+}
+
 func TestAssociation(t *testing.T) {
 	user := User{
 		Name: "association_user",

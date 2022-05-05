@@ -322,14 +322,14 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	var value interface{}
 	var id int64
 	var keyFind bool
-	var isQualifiedRefExpr bool
+	var aliasTable string
 	if isInsert {
 		value, id, keyFind, err = s.insertValue(r.ShardingKey, insertNames, insertValues, args...)
 		if err != nil {
 			return
 		}
 	} else {
-		value, id, keyFind, isQualifiedRefExpr, err = s.nonInsertValue(tableName, r.ShardingKey, condition, args...)
+		value, id, keyFind, aliasTable, err = s.nonInsertValue(tableName, r.ShardingKey, condition, args...)
 		if err != nil {
 			return
 		}
@@ -382,8 +382,8 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		stQuery = stmt.String()
 	case *sqlparser.SelectStatement:
 		ftQuery = stmt.String()
-		if isQualifiedRefExpr {
-			newTable.Alias = &sqlparser.Ident{Name: tableName}
+		if aliasTable != "" {
+			newTable.Alias = &sqlparser.Ident{Name: aliasTable}
 		}
 		stmt.FromItems = newTable
 		stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
@@ -429,7 +429,7 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 	return
 }
 
-func (s *Sharding) nonInsertValue(tableName, key string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, isQualifiedRefExpr bool, err error) {
+func (s *Sharding) nonInsertValue(tableName, key string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, alias string, err error) {
 	var handleExprIdent = func(n *sqlparser.BinaryExpr, x *sqlparser.Ident) (err error) {
 		if x.Name == key && n.Op == sqlparser.EQ {
 			keyFind = true
@@ -470,10 +470,8 @@ func (s *Sharding) nonInsertValue(tableName, key string, condition sqlparser.Exp
 			if x, ok := n.X.(*sqlparser.Ident); ok {
 				return handleExprIdent(n, x)
 			} else if ref, ok := n.X.(*sqlparser.QualifiedRef); ok {
-				if ref.Table.Name == tableName {
-					isQualifiedRefExpr = true
-					return handleExprIdent(n, ref.Column)
-				}
+				alias = ref.Table.Name
+				return handleExprIdent(n, ref.Column)
 			}
 		}
 
@@ -484,7 +482,7 @@ func (s *Sharding) nonInsertValue(tableName, key string, condition sqlparser.Exp
 	}
 
 	if !keyFind && id == 0 {
-		return nil, 0, keyFind, false, ErrMissingShardingKey
+		return nil, 0, keyFind, "", ErrMissingShardingKey
 	}
 
 	return
