@@ -17,6 +17,12 @@ import (
 	"gorm.io/plugin/dbresolver"
 )
 
+type User struct {
+	ID     int64
+	Name   string
+	Orders []Order
+}
+
 type Order struct {
 	ID      int64 `gorm:"primarykey"`
 	UserID  int64
@@ -116,7 +122,7 @@ func init() {
 	fmt.Println("Clean only tables ...")
 	dropTables()
 	fmt.Println("AutoMigrate tables ...")
-	err := db.AutoMigrate(&Order{}, &Category{})
+	err := db.AutoMigrate(&Order{}, &Category{}, &User{})
 	if err != nil {
 		panic(err)
 	}
@@ -143,7 +149,7 @@ func init() {
 }
 
 func dropTables() {
-	tables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
+	tables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories", "users"}
 	for _, table := range tables {
 		db.Exec("DROP TABLE IF EXISTS " + table)
 		dbRead.Exec("DROP TABLE IF EXISTS " + table)
@@ -153,7 +159,7 @@ func dropTables() {
 }
 
 func TestMigrate(t *testing.T) {
-	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
+	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories", "users"}
 	sort.Strings(targetTables)
 
 	// origin tables
@@ -162,18 +168,18 @@ func TestMigrate(t *testing.T) {
 	assert.Equal(t, tables, targetTables)
 
 	// drop table
-	db.Migrator().DropTable(Order{}, &Category{})
+	db.Migrator().DropTable(Order{}, &Category{}, &User{})
 	tables, _ = db.Migrator().GetTables()
 	assert.Equal(t, len(tables), 0)
 
 	// auto migrate
-	db.AutoMigrate(&Order{}, &Category{})
+	db.AutoMigrate(&Order{}, &Category{}, &User{})
 	tables, _ = db.Migrator().GetTables()
 	sort.Strings(tables)
 	assert.Equal(t, tables, targetTables)
 
 	// auto migrate again
-	err := db.AutoMigrate(&Order{}, &Category{})
+	err := db.AutoMigrate(&Order{}, &Category{}, &User{})
 	assert.Equal(t, err, nil)
 }
 
@@ -379,6 +385,26 @@ func TestReadWriteSplitting(t *testing.T) {
 
 	dbWrite.Table("orders_0").Where("user_id", 100).Find(&order)
 	assert.Equal(t, "iPhone", order.Product)
+}
+
+func TestAssociation(t *testing.T) {
+	user := User{
+		Name: "association_user",
+		Orders: []Order{
+			{Product: "association_product_1"},
+		},
+	}
+
+	var err error
+	err = db.Create(&user).Error
+	assert.Equal(t, err, nil)
+
+	var user1 User
+	err = db.Preload("Orders").Find(&user1).Error
+	assert.Equal(t, err, nil)
+	assert.Equal(t, user1.Name, user.Name)
+	assert.Equal(t, len(user1.Orders), len(user.Orders))
+	assert.Equal(t, user1.Orders[0].Product, user.Orders[0].Product)
 }
 
 func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {

@@ -322,13 +322,14 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	var value interface{}
 	var id int64
 	var keyFind bool
+	var isQualifiedRefExpr bool
 	if isInsert {
 		value, id, keyFind, err = s.insertValue(r.ShardingKey, insertNames, insertValues, args...)
 		if err != nil {
 			return
 		}
 	} else {
-		value, id, keyFind, err = s.nonInsertValue(r.ShardingKey, condition, args...)
+		value, id, keyFind, isQualifiedRefExpr, err = s.nonInsertValue(tableName, r.ShardingKey, condition, args...)
 		if err != nil {
 			return
 		}
@@ -381,6 +382,9 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		stQuery = stmt.String()
 	case *sqlparser.SelectStatement:
 		ftQuery = stmt.String()
+		if isQualifiedRefExpr {
+			newTable.Alias = &sqlparser.Ident{Name: tableName}
+		}
 		stmt.FromItems = newTable
 		stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
 		stQuery = stmt.String()
@@ -425,43 +429,54 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 	return
 }
 
-func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
+func (s *Sharding) nonInsertValue(tableName, key string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, isQualifiedRefExpr bool, err error) {
+	var handleExprIdent = func(n *sqlparser.BinaryExpr, x *sqlparser.Ident) (err error) {
+		if x.Name == key && n.Op == sqlparser.EQ {
+			keyFind = true
+			switch expr := n.Y.(type) {
+			case *sqlparser.BindExpr:
+				value = args[expr.Pos]
+			case *sqlparser.StringLit:
+				value = expr.Value
+			case *sqlparser.NumberLit:
+				value = expr.Value
+			default:
+				return sqlparser.ErrNotImplemented
+			}
+			return nil
+		} else if x.Name == "id" && n.Op == sqlparser.EQ {
+			switch expr := n.Y.(type) {
+			case *sqlparser.BindExpr:
+				v := args[expr.Pos]
+				var ok bool
+				if id, ok = v.(int64); !ok {
+					return fmt.Errorf("ID should be int64 type")
+				}
+			case *sqlparser.NumberLit:
+				id, err = strconv.ParseInt(expr.Value, 10, 64)
+				if err != nil {
+					return err
+				}
+			default:
+				return ErrInvalidID
+			}
+			return nil
+		}
+		return nil
+	}
+
 	err = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
 		if n, ok := node.(*sqlparser.BinaryExpr); ok {
 			if x, ok := n.X.(*sqlparser.Ident); ok {
-				if x.Name == key && n.Op == sqlparser.EQ {
-					keyFind = true
-					switch expr := n.Y.(type) {
-					case *sqlparser.BindExpr:
-						value = args[expr.Pos]
-					case *sqlparser.StringLit:
-						value = expr.Value
-					case *sqlparser.NumberLit:
-						value = expr.Value
-					default:
-						return sqlparser.ErrNotImplemented
-					}
-					return nil
-				} else if x.Name == "id" && n.Op == sqlparser.EQ {
-					switch expr := n.Y.(type) {
-					case *sqlparser.BindExpr:
-						v := args[expr.Pos]
-						var ok bool
-						if id, ok = v.(int64); !ok {
-							return fmt.Errorf("ID should be int64 type")
-						}
-					case *sqlparser.NumberLit:
-						id, err = strconv.ParseInt(expr.Value, 10, 64)
-						if err != nil {
-							return err
-						}
-					default:
-						return ErrInvalidID
-					}
-					return nil
+				return handleExprIdent(n, x)
+			} else if ref, ok := n.X.(*sqlparser.QualifiedRef); ok {
+				if ref.Table.Name == tableName {
+					isQualifiedRefExpr = true
+					return handleExprIdent(n, ref.Column)
 				}
 			}
 		}
+
 		return nil
 	}), condition)
 	if err != nil {
@@ -469,7 +484,7 @@ func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...
 	}
 
 	if !keyFind && id == 0 {
-		return nil, 0, keyFind, ErrMissingShardingKey
+		return nil, 0, keyFind, false, ErrMissingShardingKey
 	}
 
 	return
