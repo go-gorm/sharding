@@ -16,6 +16,7 @@ import (
 var (
 	ErrMissingShardingKey = errors.New("sharding key or id required, and use operator =")
 	ErrInvalidID          = errors.New("invalid id format")
+	ErrInsertDiffSuffix   = errors.New("can not insert different suffix table in one query ")
 )
 
 var (
@@ -342,7 +343,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			}
 
 			if suffix != "" && suffix != subSuffix {
-				err = fmt.Errorf("can not insert different suffix table in one query (%s,%s)", tableName+suffix, tableName+subSuffix)
+				err = ErrInsertDiffSuffix
 				return
 			}
 

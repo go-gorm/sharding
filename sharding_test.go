@@ -202,6 +202,11 @@ func TestInsertManyWithFillID(t *testing.T) {
 	assert.Equal(t, toDialect(expected), lastQuery)
 }
 
+func TestInsertDiffSuffix(t *testing.T) {
+	err := db.Create([]Order{{UserID: 100, Product: "Mac"}, {UserID: 101, Product: "Mac Pro"}}).Error
+	assert.Equal(t, ErrInsertDiffSuffix, err)
+}
+
 func TestSelect1(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id", 101).Where("id", node.Generate().Int64()).Find(&[]Order{})
 	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "user_id" = $1 AND "id" = $2`, tx)
