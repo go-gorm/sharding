@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -190,16 +191,12 @@ func TestFillID(t *testing.T) {
 }
 
 func TestInsertManyWithFillID(t *testing.T) {
-	node, _ := snowflake.NewNode(0)
-	sfid1 := node.Generate().Int64()
-	sfid2 := node.Generate().Int64()
-
 	err := db.Create([]Order{{UserID: 100, Product: "Mac"}, {UserID: 100, Product: "Mac Pro"}}).Error
 	assert.Equal(t, err, nil)
 
-	expected := fmt.Sprintf(`INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, %d), ($3, $4, %d) RETURNING "id"`, sfid1, sfid2)
+	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, $sfid), ($3, $4, $sfid) RETURNING "id"`
 	lastQuery := middleware.LastQuery()
-	assert.Equal(t, toDialect(expected), lastQuery)
+	assertSfidQueryResult(t, toDialect(expected), lastQuery)
 }
 
 func TestInsertDiffSuffix(t *testing.T) {
@@ -413,4 +410,33 @@ func toDialect(sql string) string {
 		sql = strings.ReplaceAll(sql, " RETURNING `id`", "")
 	}
 	return sql
+}
+
+// skip $sfid compare
+func assertSfidQueryResult(t *testing.T, expected, lastQuery string) {
+	t.Helper()
+
+	node, _ := snowflake.NewNode(0)
+	sfid := node.Generate().Int64()
+	sfidLen := len(strconv.Itoa(int(sfid)))
+	re := regexp.MustCompile(`\$sfid`)
+
+	for {
+		match := re.FindStringIndex(expected)
+		if len(match) == 0 {
+			break
+		}
+
+		start := match[0]
+		end := match[1]
+
+		if len(lastQuery) < start+sfidLen {
+			break
+		}
+
+		sfid := lastQuery[start : start+sfidLen]
+		expected = expected[:start] + sfid + expected[end:]
+	}
+
+	assert.Equal(t, toDialect(expected), lastQuery)
 }
