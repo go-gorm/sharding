@@ -189,6 +189,19 @@ func TestFillID(t *testing.T) {
 	assert.Equal(t, toDialect(expected), lastQuery[0:len(expected)])
 }
 
+func TestInsertManyWithFillID(t *testing.T) {
+	node, _ := snowflake.NewNode(0)
+	sfid1 := node.Generate().Int64()
+	sfid2 := node.Generate().Int64()
+
+	err := db.Create([]Order{{UserID: 100, Product: "Mac"}, {UserID: 100, Product: "Mac Pro"}}).Error
+	assert.Equal(t, err, nil)
+
+	expected := fmt.Sprintf(`INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, %d), ($3, $4, %d) RETURNING "id"`, sfid1, sfid2)
+	lastQuery := middleware.LastQuery()
+	assert.Equal(t, toDialect(expected), lastQuery)
+}
+
 func TestSelect1(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id", 101).Where("id", node.Generate().Int64()).Find(&[]Order{})
 	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "user_id" = $1 AND "id" = $2`, tx)
