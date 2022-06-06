@@ -70,29 +70,36 @@ func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...
 
 // BeginTx Implement ConnPoolBeginner.BeginTx
 func (pool *ConnPool) BeginTx(ctx context.Context, opt *sql.TxOptions) (gorm.ConnPool, error) {
-	if basePool, ok := pool.ConnPool.(gorm.ConnPoolBeginner); ok {
+	switch basePool := pool.ConnPool.(type) {
+	case gorm.ConnPoolBeginner:
 		return basePool.BeginTx(ctx, opt)
+	case gorm.TxBeginner:
+		tx, err := basePool.BeginTx(ctx, opt)
+		if err != nil {
+			return nil, err
+		}
+		return &ConnPool{pool.sharding, tx}, nil
 	}
 
-	return pool, nil
+	return pool, gorm.ErrInvalidTransaction
 }
 
-// Implement TxCommitter.Commit
+// Commit Implement TxCommitter.Commit
 func (pool *ConnPool) Commit() error {
 	if basePool, ok := pool.ConnPool.(gorm.TxCommitter); ok {
 		return basePool.Commit()
 	}
 
-	return nil
+	return gorm.ErrInvalidTransaction
 }
 
-// Implement TxCommitter.Rollback
+// Rollback Implement TxCommitter.Rollback
 func (pool *ConnPool) Rollback() error {
 	if basePool, ok := pool.ConnPool.(gorm.TxCommitter); ok {
 		return basePool.Rollback()
 	}
 
-	return nil
+	return gorm.ErrInvalidTransaction
 }
 
 func (pool *ConnPool) Ping() error {
