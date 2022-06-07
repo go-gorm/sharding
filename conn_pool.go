@@ -107,6 +107,64 @@ func (pool *ShardTxCommitter) Rollback() error {
 	return gorm.ErrInvalidTransaction
 }
 
+func (pool *ShardTxCommitter) String() string {
+	return "gorm:sharding:conn_pool"
+}
+
+func (pool ShardTxCommitter) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+	return pool.ConnPool.PrepareContext(ctx, query)
+}
+
+func (pool ShardTxCommitter) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	pool.sharding.querys.Store("last_query", stQuery)
+
+	if table != "" {
+		if r, ok := pool.sharding.configs[table]; ok {
+			if r.DoubleWrite {
+				pool.ConnPool.ExecContext(ctx, ftQuery, args...)
+			}
+		}
+	}
+
+	return pool.ConnPool.ExecContext(ctx, stQuery, args...)
+}
+
+// https://github.com/go-gorm/gorm/blob/v1.21.11/callbacks/query.go#L18
+func (pool ShardTxCommitter) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	pool.sharding.querys.Store("last_query", stQuery)
+
+	if table != "" {
+		if r, ok := pool.sharding.configs[table]; ok {
+			if r.DoubleWrite {
+				pool.ConnPool.ExecContext(ctx, ftQuery, args...)
+			}
+		}
+	}
+
+	return pool.ConnPool.QueryContext(ctx, stQuery, args...)
+}
+
+func (pool ShardTxCommitter) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	_, query, _, _ = pool.sharding.resolve(query, args...)
+	pool.sharding.querys.Store("last_query", query)
+
+	return pool.ConnPool.QueryRowContext(ctx, query, args...)
+}
+
+func (pool *ShardTxCommitter) Ping() error {
+	return nil
+}
+
 func (pool *ShardConnPool) Ping() error {
 	return nil
 }
