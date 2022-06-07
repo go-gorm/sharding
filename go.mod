@@ -6,7 +6,7 @@ require (
 	github.com/bwmarrin/snowflake v0.3.0
 	github.com/longbridgeapp/assert v0.1.0
 	github.com/longbridgeapp/sqlparser v0.3.1
-	gorm.io/driver/mysql v1.3.3
+	gorm.io/driver/mysql v1.3.4
 	gorm.io/driver/postgres v1.3.7
 	gorm.io/gorm v1.23.5
 	gorm.io/hints v1.1.0
