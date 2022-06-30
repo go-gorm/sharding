@@ -94,6 +94,35 @@ Recommend options:
 - [Snowflake](https://github.com/bwmarrin/snowflake)
 - [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
 
+### Use Snowflake
+
+Built-in Snowflake primary key generator.
+
+```
+db.Use(sharding.Register(sharding.Config{
+    ShardingKey:         "user_id",
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
+}, "orders")
+```
+
+### Use PostgreSQL Sequence
+
+There has built-in PostgreSQL sequence primary key implementation in Gorm Sharding, you just configure `PrimaryKeyGenerator: sharding.PKPGSequence` to use.
+
+You don't need create sequence manually, Gorm Sharding check and create when the PostgreSQL sequence does not exists.
+
+This sequence name followed `gorm_sharding_${table_name}_id_seq`, for example `orders` table, the sequence name is `gorm_sharding_orders_id_seq`.
+
+```
+db.Use(sharding.Register(sharding.Config{
+    ShardingKey:         "user_id",
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKPGSequence,
+    SequenceName:        "orders_sequence",
+}, "orders")
+```
+
 ## Combining with dbresolver
 
 > 🚨 NOTE: Use dbresolver first.
