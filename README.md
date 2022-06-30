@@ -98,7 +98,7 @@ Recommend options:
 
 Built-in Snowflake primary key generator.
 
-```
+```go
 db.Use(sharding.Register(sharding.Config{
     ShardingKey:         "user_id",
     NumberOfShards:      64,
@@ -114,7 +114,7 @@ You don't need create sequence manually, Gorm Sharding check and create when the
 
 This sequence name followed `gorm_sharding_${table_name}_id_seq`, for example `orders` table, the sequence name is `gorm_sharding_orders_id_seq`.
 
-```
+```go
 db.Use(sharding.Register(sharding.Config{
     ShardingKey:         "user_id",
     NumberOfShards:      64,
