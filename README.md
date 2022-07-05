@@ -119,7 +119,6 @@ db.Use(sharding.Register(sharding.Config{
     ShardingKey:         "user_id",
     NumberOfShards:      64,
     PrimaryKeyGenerator: sharding.PKPGSequence,
-    SequenceName:        "orders_sequence",
 }, "orders")
 ```
 
