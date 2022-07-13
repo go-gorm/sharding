@@ -40,12 +40,8 @@ db.Use(sharding.Register(sharding.Config{
     ShardingKey:         "user_id",
     NumberOfShards:      64,
     PrimaryKeyGenerator: sharding.PKSnowflake,
-}, "orders").Register(sharding.Config{
-    ShardingKey:         "user_id",
-    NumberOfShards:      256,
-    PrimaryKeyGenerator: sharding.PKSnowflake,
-    // This case for show up give notifications, audit_logs table use same sharding rule.
-}, Notification{}, AuditLog{}))
+}, "orders", Notification{}, AuditLog{}))
+// This case for show up give notifications, audit_logs table use same sharding rule.
 ```
 
 Use the db session as usual. Just note that the query should have the `Sharding Key` when operate sharding tables.
