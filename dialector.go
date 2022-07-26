@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"gorm.io/gorm/schema"
 )
 
 type ShardingDialector struct {
@@ -31,6 +33,28 @@ func (d ShardingDialector) Migrator(db *gorm.DB) gorm.Migrator {
 		sharding:  d.sharding,
 		dialector: d.Dialector,
 	}
+}
+
+// BuildIndexOptions build index options
+func (m ShardingDialector) BuildIndexOptions(opts []schema.IndexOption, stmt *gorm.Statement) (results []interface{}) {
+	for _, opt := range opts {
+		str := stmt.Quote(opt.DBName)
+		if opt.Expression != "" {
+			str = opt.Expression
+		} else if opt.Length > 0 {
+			str += fmt.Sprintf("(%d)", opt.Length)
+		}
+
+		if opt.Collate != "" {
+			str += " COLLATE " + opt.Collate
+		}
+
+		if opt.Sort != "" {
+			str += " " + opt.Sort
+		}
+		results = append(results, clause.Expr{SQL: str})
+	}
+	return
 }
 
 func (m ShardingMigrator) AutoMigrate(dst ...interface{}) error {
