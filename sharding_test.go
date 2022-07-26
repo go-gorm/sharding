@@ -156,7 +156,6 @@ func dropTables() {
 }
 
 func TestMigrate(t *testing.T) {
-	t.Skip()
 	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
 	sort.Strings(targetTables)
 
