@@ -79,6 +79,10 @@ func (pool *ConnPool) BeginTx(ctx context.Context, opt *sql.TxOptions) (gorm.Con
 
 // Implement TxCommitter.Commit
 func (pool *ConnPool) Commit() error {
+	if _, ok := pool.ConnPool.(*sql.Tx); ok {
+		return nil
+	}
+
 	if basePool, ok := pool.ConnPool.(gorm.TxCommitter); ok {
 		return basePool.Commit()
 	}
@@ -88,6 +92,10 @@ func (pool *ConnPool) Commit() error {
 
 // Implement TxCommitter.Rollback
 func (pool *ConnPool) Rollback() error {
+	if _, ok := pool.ConnPool.(*sql.Tx); ok {
+		return nil
+	}
+
 	if basePool, ok := pool.ConnPool.(gorm.TxCommitter); ok {
 		return basePool.Rollback()
 	}
