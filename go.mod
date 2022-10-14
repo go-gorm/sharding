@@ -10,7 +10,7 @@ require (
 	gorm.io/driver/postgres v1.3.7
 	gorm.io/gorm v1.24.0
 	gorm.io/hints v1.1.0
-	gorm.io/plugin/dbresolver v1.2.2
+	gorm.io/plugin/dbresolver v1.3.0
 )
 
 require (
