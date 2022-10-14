@@ -80,6 +80,7 @@ fmt.Println(err) // ErrMissingShardingKey
 The full example is [here](./examples/order.go).
 
 > 🚨 NOTE: Gorm config `PrepareStmt: true` is not supported for now.
+>
 > 🚨 NOTE: Default snowflake generator in multiple nodes may result conflicted primary key, use your custom primary key generator, or regenerate a primary key when conflict occurs.
 
 ## Primary Key
