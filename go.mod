@@ -6,7 +6,7 @@ require (
 	github.com/bwmarrin/snowflake v0.3.0
 	github.com/longbridgeapp/assert v0.1.0
 	github.com/longbridgeapp/sqlparser v0.3.1
-	gorm.io/driver/mysql v1.4.1
+	gorm.io/driver/mysql v1.4.5
 	gorm.io/driver/postgres v1.4.4
 	gorm.io/gorm v1.24.0
 	gorm.io/hints v1.1.0
@@ -15,7 +15,7 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/go-sql-driver/mysql v1.6.0 // indirect
+	github.com/go-sql-driver/mysql v1.7.0 // indirect
 	github.com/jackc/chunkreader/v2 v2.0.1 // indirect
 	github.com/jackc/pgconn v1.13.0 // indirect
 	github.com/jackc/pgio v1.0.0 // indirect
