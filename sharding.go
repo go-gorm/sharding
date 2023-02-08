@@ -353,25 +353,21 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			newTable = &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
 
 			fillID := true
-			if isInsert {
-				for _, name := range insertNames {
-					if name.Name == "id" {
-						fillID = false
-						break
-					}
-				}
-				if fillID {
-					tblIdx, err := strconv.Atoi(strings.Replace(suffix, "_", "", 1))
-					if err != nil {
-						return ftQuery, stQuery, tableName, err
-					}
-					id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
-					columnNames = append(insertNames, &sqlparser.Ident{Name: "id"})
-					insertValues = append(insertValues, &sqlparser.NumberLit{Value: strconv.FormatInt(id, 10)})
+			for _, name := range insertNames {
+				if name.Name == "id" {
+					fillID = false
+					break
 				}
 			}
-
 			if fillID {
+				tblIdx, err := strconv.Atoi(strings.Replace(suffix, "_", "", 1))
+				if err != nil {
+					return ftQuery, stQuery, tableName, err
+				}
+				id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
+				columnNames = append(insertNames, &sqlparser.Ident{Name: "id"})
+				insertValues = append(insertValues, &sqlparser.NumberLit{Value: strconv.FormatInt(id, 10)})
+
 				insertStmt.ColumnNames = columnNames
 				inserExpression.Exprs = insertValues
 			}
@@ -397,6 +393,10 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 		switch stmt := expr.(type) {
 		case *sqlparser.SelectStatement:
+			if aliasTable != "" {
+				newTable.Alias = &sqlparser.Ident{Name: aliasTable}
+			}
+
 			ftQuery = stmt.String()
 			stmt.FromItems = newTable
 			stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
@@ -428,55 +428,6 @@ func getSuffix(value interface{}, id int64, keyFind bool, r Config) (suffix stri
 		}
 		suffix = r.ShardingAlgorithmByPrimaryKey(id)
 	}
-
-	newTable := &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
-
-	fillID := true
-	if isInsert {
-		for _, name := range insertNames {
-			if name.Name == "id" {
-				fillID = false
-				break
-			}
-		}
-		if fillID {
-			tblIdx, err := strconv.Atoi(strings.Replace(suffix, "_", "", 1))
-			if err != nil {
-				return ftQuery, stQuery, tableName, err
-			}
-			id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
-			insertNames = append(insertNames, &sqlparser.Ident{Name: "id"})
-			insertValues = append(insertValues, &sqlparser.NumberLit{Value: strconv.FormatInt(id, 10)})
-		}
-	}
-
-	switch stmt := expr.(type) {
-	case *sqlparser.InsertStatement:
-		if fillID {
-			stmt.ColumnNames = insertNames
-			stmt.Expressions[0].Exprs = insertValues
-		}
-		ftQuery = stmt.String()
-		stmt.TableName = newTable
-		stQuery = stmt.String()
-	case *sqlparser.SelectStatement:
-		ftQuery = stmt.String()
-		if aliasTable != "" {
-			newTable.Alias = &sqlparser.Ident{Name: aliasTable}
-		}
-		stmt.FromItems = newTable
-		stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
-		stQuery = stmt.String()
-	case *sqlparser.UpdateStatement:
-		ftQuery = stmt.String()
-		stmt.TableName = newTable
-		stQuery = stmt.String()
-	case *sqlparser.DeleteStatement:
-		ftQuery = stmt.String()
-		stmt.TableName = newTable
-		stQuery = stmt.String()
-	}
-
 	return
 }
 
