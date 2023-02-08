@@ -40,12 +40,8 @@ db.Use(sharding.Register(sharding.Config{
     ShardingKey:         "user_id",
     NumberOfShards:      64,
     PrimaryKeyGenerator: sharding.PKSnowflake,
-}, "orders").Register(sharding.Config{
-    ShardingKey:         "user_id",
-    NumberOfShards:      256,
-    PrimaryKeyGenerator: sharding.PKSnowflake,
-    // This case for show up give notifications, audit_logs table use same sharding rule.
-}, Notification{}, AuditLog{}))
+}, "orders", Notification{}, AuditLog{}))
+// This case for show up give notifications, audit_logs table use same sharding rule.
 ```
 
 Use the db session as usual. Just note that the query should have the `Sharding Key` when operate sharding tables.
@@ -84,6 +80,8 @@ fmt.Println(err) // ErrMissingShardingKey
 The full example is [here](./examples/order.go).
 
 > 🚨 NOTE: Gorm config `PrepareStmt: true` is not supported for now.
+>
+> 🚨 NOTE: Default snowflake generator in multiple nodes may result conflicted primary key, use your custom primary key generator, or regenerate a primary key when conflict occurs.
 
 ## Primary Key
 
@@ -93,6 +91,34 @@ Recommend options:
 
 - [Snowflake](https://github.com/bwmarrin/snowflake)
 - [Database sequence by manully](https://www.postgresql.org/docs/current/sql-createsequence.html)
+
+### Use Snowflake
+
+Built-in Snowflake primary key generator.
+
+```go
+db.Use(sharding.Register(sharding.Config{
+    ShardingKey:         "user_id",
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
+}, "orders")
+```
+
+### Use PostgreSQL Sequence
+
+There has built-in PostgreSQL sequence primary key implementation in Gorm Sharding, you just configure `PrimaryKeyGenerator: sharding.PKPGSequence` to use.
+
+You don't need create sequence manually, Gorm Sharding check and create when the PostgreSQL sequence does not exists.
+
+This sequence name followed `gorm_sharding_${table_name}_id_seq`, for example `orders` table, the sequence name is `gorm_sharding_orders_id_seq`.
+
+```go
+db.Use(sharding.Register(sharding.Config{
+    ShardingKey:         "user_id",
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKPGSequence,
+}, "orders")
+```
 
 ## Combining with dbresolver
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -195,6 +196,20 @@ func TestFillID(t *testing.T) {
 	assert.Equal(t, toDialect(expected), lastQuery[0:len(expected)])
 }
 
+func TestInsertManyWithFillID(t *testing.T) {
+	err := db.Create([]Order{{UserID: 100, Product: "Mac"}, {UserID: 100, Product: "Mac Pro"}}).Error
+	assert.Equal(t, err, nil)
+
+	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, $sfid), ($3, $4, $sfid) RETURNING "id"`
+	lastQuery := middleware.LastQuery()
+	assertSfidQueryResult(t, toDialect(expected), lastQuery)
+}
+
+func TestInsertDiffSuffix(t *testing.T) {
+	err := db.Create([]Order{{UserID: 100, Product: "Mac"}, {UserID: 101, Product: "Mac Pro"}}).Error
+	assert.Equal(t, ErrInsertDiffSuffix, err)
+}
+
 func TestSelect1(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id", 101).Where("id", node.Generate().Int64()).Find(&[]Order{})
 	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "user_id" = $1 AND "id" = $2`, tx)
@@ -314,6 +329,7 @@ func TestNoSharding(t *testing.T) {
 }
 
 func TestPKSnowflake(t *testing.T) {
+	var db *gorm.DB
 	if os.Getenv("DIALECTOR") == "mysql" {
 		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
@@ -430,4 +446,33 @@ func toDialect(sql string) string {
 		sql = strings.ReplaceAll(sql, " RETURNING `id`", "")
 	}
 	return sql
+}
+
+// skip $sfid compare
+func assertSfidQueryResult(t *testing.T, expected, lastQuery string) {
+	t.Helper()
+
+	node, _ := snowflake.NewNode(0)
+	sfid := node.Generate().Int64()
+	sfidLen := len(strconv.Itoa(int(sfid)))
+	re := regexp.MustCompile(`\$sfid`)
+
+	for {
+		match := re.FindStringIndex(expected)
+		if len(match) == 0 {
+			break
+		}
+
+		start := match[0]
+		end := match[1]
+
+		if len(lastQuery) < start+sfidLen {
+			break
+		}
+
+		sfid := lastQuery[start : start+sfidLen]
+		expected = expected[:start] + sfid + expected[end:]
+	}
+
+	assert.Equal(t, toDialect(expected), lastQuery)
 }

@@ -16,6 +16,7 @@ import (
 var (
 	ErrMissingShardingKey = errors.New("sharding key or id required, and use operator =")
 	ErrInvalidID          = errors.New("invalid id format")
+	ErrInsertDiffSuffix   = errors.New("can not insert different suffix table in one query ")
 )
 
 var (
@@ -285,7 +286,8 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	var condition sqlparser.Expr
 	var isInsert bool
 	var insertNames []*sqlparser.Ident
-	var insertValues []sqlparser.Expr
+	var inserExpressions []*sqlparser.Exprs
+	var insertStmt *sqlparser.InsertStatement
 
 	switch stmt := expr.(type) {
 	case *sqlparser.SelectStatement:
@@ -302,7 +304,8 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		table = stmt.TableName
 		isInsert = true
 		insertNames = stmt.ColumnNames
-		insertValues = stmt.Expressions[0].Exprs
+		inserExpressions = stmt.Expressions
+		insertStmt = stmt
 	case *sqlparser.UpdateStatement:
 		condition = stmt.Condition
 		table = stmt.TableName
@@ -323,20 +326,96 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	var id int64
 	var keyFind bool
 	var aliasTable string
+	var suffix string
 	if isInsert {
-		value, id, keyFind, err = s.insertValue(r.ShardingKey, insertNames, insertValues, args...)
+		var newTable *sqlparser.TableName
+		for _, inserExpression := range inserExpressions {
+			columnNames := insertNames
+			insertValues := inserExpression.Exprs
+			value, id, keyFind, err = s.insertValue(r.ShardingKey, insertNames, insertValues, args...)
+			if err != nil {
+				return
+			}
+
+			var subSuffix string
+			subSuffix, err = getSuffix(value, id, keyFind, r)
+			if err != nil {
+				return
+			}
+
+			if suffix != "" && suffix != subSuffix {
+				err = ErrInsertDiffSuffix
+				return
+			}
+
+			suffix = subSuffix
+
+			newTable = &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
+
+			fillID := true
+			if isInsert {
+				for _, name := range insertNames {
+					if name.Name == "id" {
+						fillID = false
+						break
+					}
+				}
+				if fillID {
+					tblIdx, err := strconv.Atoi(strings.Replace(suffix, "_", "", 1))
+					if err != nil {
+						return ftQuery, stQuery, tableName, err
+					}
+					id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
+					columnNames = append(insertNames, &sqlparser.Ident{Name: "id"})
+					insertValues = append(insertValues, &sqlparser.NumberLit{Value: strconv.FormatInt(id, 10)})
+				}
+			}
+
+			if fillID {
+				insertStmt.ColumnNames = columnNames
+				inserExpression.Exprs = insertValues
+			}
+		}
+
+		ftQuery = insertStmt.String()
+		insertStmt.TableName = newTable
+		stQuery = insertStmt.String()
+
+	} else {
+		value, id, keyFind, aliasTable, err = s.nonInsertValue(tableName, r.ShardingKey, condition, args...)
+
 		if err != nil {
 			return
 		}
-	} else {
-		value, id, keyFind, aliasTable, err = s.nonInsertValue(tableName, r.ShardingKey, condition, args...)
+
+		suffix, err = getSuffix(value, id, keyFind, r)
 		if err != nil {
 			return
+		}
+
+		newTable := &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
+
+		switch stmt := expr.(type) {
+		case *sqlparser.SelectStatement:
+			ftQuery = stmt.String()
+			stmt.FromItems = newTable
+			stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
+			stQuery = stmt.String()
+		case *sqlparser.UpdateStatement:
+			ftQuery = stmt.String()
+			stmt.TableName = newTable
+			stQuery = stmt.String()
+		case *sqlparser.DeleteStatement:
+			ftQuery = stmt.String()
+			stmt.TableName = newTable
+			stQuery = stmt.String()
 		}
 	}
 
-	var suffix string
+	return
+}
 
+func getSuffix(value interface{}, id int64, keyFind bool, r Config) (suffix string, err error) {
 	if keyFind {
 		suffix, err = r.ShardingAlgorithm(value)
 		if err != nil {
