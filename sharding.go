@@ -34,7 +34,7 @@ type Sharding struct {
 	_tables []interface{}
 }
 
-//  Config specifies the configuration for sharding.
+// Config specifies the configuration for sharding.
 type Config struct {
 	// When DoubleWrite enabled, data will double write to both main table and sharding table.
 	DoubleWrite bool
@@ -153,13 +153,13 @@ func (s *Sharding) compile() error {
 			if c.NumberOfShards == 0 {
 				return errors.New("specify NumberOfShards or ShardingAlgorithm")
 			}
-			if c.NumberOfShards < 10 {
+			if c.NumberOfShards <= 10 {
 				c.tableFormat = "_%01d"
-			} else if c.NumberOfShards < 100 {
+			} else if c.NumberOfShards <= 100 {
 				c.tableFormat = "_%02d"
-			} else if c.NumberOfShards < 1000 {
+			} else if c.NumberOfShards <= 1000 {
 				c.tableFormat = "_%03d"
-			} else if c.NumberOfShards < 10000 {
+			} else if c.NumberOfShards <= 10000 {
 				c.tableFormat = "_%04d"
 			}
 			c.ShardingAlgorithm = func(value interface{}) (suffix string, err error) {
