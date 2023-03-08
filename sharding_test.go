@@ -33,7 +33,7 @@ func databaseURL() string {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if len(databaseURL) == 0 {
 		databaseURL = "postgres://localhost:5432/sharding-test?sslmode=disable"
-		if os.Getenv("DIALECTOR") == "mysql" {
+		if mysqlDialector() {
 			databaseURL = "root@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4"
 		}
 	}
@@ -44,7 +44,7 @@ func databaseReadURL() string {
 	databaseURL := os.Getenv("DATABASE_READ_URL")
 	if len(databaseURL) == 0 {
 		databaseURL = "postgres://localhost:5432/sharding-read-test?sslmode=disable"
-		if os.Getenv("DIALECTOR") == "mysql" {
+		if mysqlDialector() {
 			databaseURL = "root@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4"
 		}
 	}
@@ -55,7 +55,7 @@ func databaseWriteURL() string {
 	databaseURL := os.Getenv("DATABASE_WRITE_URL")
 	if len(databaseURL) == 0 {
 		databaseURL = "postgres://localhost:5432/sharding-write-test?sslmode=disable"
-		if os.Getenv("DIALECTOR") == "mysql" {
+		if mysqlDialector() {
 			databaseURL = "root@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4"
 		}
 	}
@@ -83,7 +83,7 @@ var (
 )
 
 func init() {
-	if os.Getenv("DIALECTOR") == "mysql" {
+	if mysqlDialector() {
 		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
@@ -324,7 +324,7 @@ func TestNoSharding(t *testing.T) {
 
 func TestPKSnowflake(t *testing.T) {
 	var db *gorm.DB
-	if os.Getenv("DIALECTOR") == "mysql" {
+	if mysqlDialector() {
 		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
@@ -347,7 +347,7 @@ func TestPKSnowflake(t *testing.T) {
 }
 
 func TestPKPGSequence(t *testing.T) {
-	if os.Getenv("DIALECTOR") == "mysql" {
+	if mysqlDialector() {
 		return
 	}
 
@@ -369,7 +369,7 @@ func TestReadWriteSplitting(t *testing.T) {
 	dbWrite.Exec("INSERT INTO orders_0 (id, product, user_id) VALUES(1, 'iPad', 100)")
 
 	var db *gorm.DB
-	if os.Getenv("DIALECTOR") == "mysql" {
+	if mysqlDialector() {
 		db, _ = gorm.Open(mysql.Open(databaseWriteURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
@@ -408,6 +408,10 @@ func toDialect(sql string) string {
 		r := regexp.MustCompile(`\$([0-9]+)`)
 		sql = r.ReplaceAllString(sql, "?")
 		sql = strings.ReplaceAll(sql, " RETURNING `id`", "")
+	} else if os.Getenv("DIALECTOR") == "mariadb" {
+		sql = strings.ReplaceAll(sql, `"`, "`")
+		r := regexp.MustCompile(`\$([0-9]+)`)
+		sql = r.ReplaceAllString(sql, "?")
 	}
 	return sql
 }
@@ -439,4 +443,8 @@ func assertSfidQueryResult(t *testing.T, expected, lastQuery string) {
 	}
 
 	assert.Equal(t, toDialect(expected), lastQuery)
+}
+
+func mysqlDialector() bool {
+	return os.Getenv("DIALECTOR") == "mysql" || os.Getenv("DIALECTOR") == "mariadb"
 }
