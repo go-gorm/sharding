@@ -175,7 +175,7 @@ func TestMigrate(t *testing.T) {
 
 	// auto migrate again
 	err := db.AutoMigrate(&Order{}, &Category{})
-	assert.Equal(t, err, nil)
+	assert.Equal[error, error](t, err, nil)
 }
 
 func TestInsert(t *testing.T) {
@@ -192,7 +192,7 @@ func TestFillID(t *testing.T) {
 
 func TestInsertManyWithFillID(t *testing.T) {
 	err := db.Create([]Order{{UserID: 100, Product: "Mac"}, {UserID: 100, Product: "Mac Pro"}}).Error
-	assert.Equal(t, err, nil)
+	assert.Equal[error, error](t, err, nil)
 
 	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, $sfid), ($3, $4, $sfid) RETURNING "id"`
 	lastQuery := middleware.LastQuery()
@@ -293,7 +293,7 @@ func TestSelectMissingShardingKey(t *testing.T) {
 func TestSelectNoSharding(t *testing.T) {
 	sql := toDialect(`SELECT /* nosharding */ * FROM "orders" WHERE "product" = 'iPad'`)
 	err := db.Exec(sql).Error
-	assert.Equal(t, nil, err)
+	assert.Equal[error](t, nil, err)
 }
 
 func TestNoEq(t *testing.T) {
@@ -303,7 +303,7 @@ func TestNoEq(t *testing.T) {
 
 func TestShardingKeyOK(t *testing.T) {
 	err := db.Model(&Order{}).Where("user_id = ? and id > ?", 101, int64(100)).Find(&[]Order{}).Error
-	assert.Equal(t, nil, err)
+	assert.Equal[error](t, nil, err)
 }
 
 func TestShardingKeyNotOK(t *testing.T) {
@@ -313,7 +313,7 @@ func TestShardingKeyNotOK(t *testing.T) {
 
 func TestShardingIdOK(t *testing.T) {
 	err := db.Model(&Order{}).Where("id = ? and user_id > ?", int64(101), 100).Find(&[]Order{}).Error
-	assert.Equal(t, nil, err)
+	assert.Equal[error](t, nil, err)
 }
 
 func TestNoSharding(t *testing.T) {
@@ -370,11 +370,11 @@ func TestReadWriteSplitting(t *testing.T) {
 
 	var db *gorm.DB
 	if os.Getenv("DIALECTOR") == "mysql" {
-		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
+		db, _ = gorm.Open(mysql.Open(databaseWriteURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
 	} else {
-		db, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		db, _ = gorm.Open(postgres.New(dbWriteConfig), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
 	}
@@ -390,7 +390,7 @@ func TestReadWriteSplitting(t *testing.T) {
 	assert.Equal(t, "iPad", order.Product)
 
 	db.Model(&Order{}).Where("user_id", 100).Update("product", "iPhone")
-	db.Table("orders_0").Where("user_id", 100).Find(&order)
+	db.Clauses(dbresolver.Read).Table("orders_0").Where("user_id", 100).Find(&order)
 	assert.Equal(t, "iPad", order.Product)
 
 	dbWrite.Table("orders_0").Where("user_id", 100).Find(&order)
