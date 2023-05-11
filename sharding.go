@@ -10,6 +10,7 @@ import (
 
 	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/sqlparser"
+	"golang.org/x/exp/slices"
 	"gorm.io/gorm"
 )
 
@@ -62,7 +63,7 @@ type Config struct {
 	ShardingAlgorithm func(columnValue interface{}) (suffix string, err error)
 
 	// ShardingSuffixs specifies a function to generate all table's suffix.
-	// Used to support Migrator.
+	// Used to support Migrator and generate PrimaryKey.
 	// For example, this function get a mod all sharding suffixs.
 	//
 	// func () (suffixs []string) {
@@ -360,9 +361,14 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 					}
 				}
 				if fillID {
-					tblIdx, err := strconv.Atoi(strings.Replace(suffix, "_", "", 1))
+					suffixWord := strings.Replace(suffix, "_", "", 1)
+					tblIdx, err := strconv.Atoi(suffixWord)
 					if err != nil {
-						return ftQuery, stQuery, tableName, err
+						tblIdx = slices.Index(r.ShardingSuffixs(), suffixWord)
+						if tblIdx == -1 {
+							return ftQuery, stQuery, tableName, errors.New("table suffix '" + suffixWord + "' is not in ShardingSuffixs. In order to generate the primary key, ShardingSuffixs should include all table suffixes")
+						}
+						//return ftQuery, stQuery, tableName, err
 					}
 					id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
 					columnNames = append(insertNames, &sqlparser.Ident{Name: "id"})
