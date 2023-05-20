@@ -22,6 +22,7 @@ var (
 
 var (
 	ShardingIgnoreStoreKey = "sharding_ignore"
+	ShardingQueryStoreKey  = "sharding_query"
 )
 
 type Sharding struct {
@@ -258,6 +259,13 @@ func (s *Sharding) registerCallbacks(db *gorm.DB) {
 	s.Callback().Delete().Before("*").Register("gorm:sharding", s.switchConn)
 	s.Callback().Row().Before("*").Register("gorm:sharding", s.switchConn)
 	s.Callback().Raw().Before("*").Register("gorm:sharding", s.switchConn)
+
+	s.Callback().Create().After("*").Register("gorm:sharding:mocksql", s.mockShardingSQL)
+	s.Callback().Query().After("*").Register("gorm:sharding:mocksql", s.mockShardingSQL)
+	s.Callback().Update().After("*").Register("gorm:sharding:mocksql", s.mockShardingSQL)
+	s.Callback().Delete().After("*").Register("gorm:sharding:mocksql", s.mockShardingSQL)
+	s.Callback().Row().After("*").Register("gorm:sharding:mocksql", s.mockShardingSQL)
+	s.Callback().Raw().After("*").Register("gorm:sharding:mocksql", s.mockShardingSQL)
 }
 
 func (s *Sharding) switchConn(db *gorm.DB) {
@@ -265,8 +273,17 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 	// When DoubleWrite is enabled, we need to query database schema
 	// information by table name during the migration.
 	if _, ok := db.Get(ShardingIgnoreStoreKey); !ok {
-		s.ConnPool = &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s}
+		s.ConnPool = &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s, settings: &db.Statement.Settings}
 		db.Statement.ConnPool = s.ConnPool
+	}
+}
+
+// When all callbacks are executed, SQL is only used for log tracing, so there are no side effects.
+// stmt.Settings will cloned even in save association.
+func (s *Sharding) mockShardingSQL(db *gorm.DB) {
+	if sql, ok := db.Get(ShardingQueryStoreKey); ok {
+		db.Statement.SQL.Reset()
+		db.Statement.SQL.WriteString(sql.(string))
 	}
 }
 
