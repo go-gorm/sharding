@@ -1,6 +1,7 @@
 package sharding
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"regexp"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/assert"
@@ -395,6 +397,36 @@ func TestReadWriteSplitting(t *testing.T) {
 
 	dbWrite.Table("orders_0").Where("user_id", 100).Find(&order)
 	assert.Equal(t, "iPhone", order.Product)
+}
+
+func TestDataRace(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan error)
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					err := db.Model(&Order{}).Where("user_id", 100).Find(&[]Order{}).Error
+					if err != nil {
+						ch <- err
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	select {
+	case <-time.After(time.Millisecond * 50):
+		cancel()
+	case err := <-ch:
+		cancel()
+		t.Fatal(err)
+	}
 }
 
 func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {
