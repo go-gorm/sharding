@@ -131,7 +131,7 @@ jobs:
 
     strategy:
       matrix:
-        dbversion: ["mariadb:latest"]
+        dbversion: ["mariadb:10.11"]
         platform: [ubuntu-latest]
     runs-on: ${{ matrix.platform }}
 
