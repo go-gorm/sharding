@@ -120,6 +120,10 @@ db.Use(sharding.Register(sharding.Config{
 }, "orders")
 ```
 
+### No primary key
+
+If your table doesn't have a primary key, or has a primary key that isn't called `id`, anyway, you don't want to auto-fill the `id` field, then you can set `PrimaryKeyGenerator` to `PKCustom` and have `PrimaryKeyGeneratorFn` return `0`.
+
 ## Combining with dbresolver
 
 > 🚨 NOTE: Use dbresolver first.
