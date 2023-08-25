@@ -40,15 +40,19 @@ jobs:
 
     env:
       DIALECTOR: postgres
-      DATABASE_URL: postgres://gorm:gorm@localhost:5432/sharding-test
-      DATABASE_READ_URL: postgres://gorm:gorm@localhost:5432/sharding-read-test
-      DATABASE_WRITE_URL: postgres://gorm:gorm@localhost:5432/sharding-write-test
+      DB_URL: postgres://gorm:gorm@localhost:5432/sharding-test
+      DB_NOID_URL: postgres://gorm:gorm@localhost:5432/sharding-noid-test
+      DB_READ_URL: postgres://gorm:gorm@localhost:5432/sharding-read-test
+      DB_WRITE_URL: postgres://gorm:gorm@localhost:5432/sharding-write-test
     steps:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
           go-version: "1.20"
         id: go
+
+      - name: Create No ID Database
+        run: PGPASSWORD=gorm psql -h localhost -U gorm -d sharding-test -c 'CREATE DATABASE "sharding-noid-test";'
 
       - name: Create Read Database
         run: PGPASSWORD=gorm psql -h localhost -U gorm -d sharding-test -c 'CREATE DATABASE "sharding-read-test";'
@@ -93,9 +97,10 @@ jobs:
 
     env:
       DIALECTOR: mysql
-      DATABASE_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4&parseTime=True&loc=Local
-      DATABASE_READ_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4&parseTime=True&loc=Local
-      DATABASE_WRITE_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4&parseTime=True&loc=Local
+      DB_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4&parseTime=True&loc=Local
+      DB_NOID_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-noid-test?charset=utf8mb4&parseTime=True&loc=Local
+      DB_READ_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4&parseTime=True&loc=Local
+      DB_WRITE_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4&parseTime=True&loc=Local
     steps:
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -103,13 +108,14 @@ jobs:
           go-version: "1.20"
         id: go
 
+      - name: Create No ID Database
+        run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-noid-test
+
       - name: Create Read Database
         run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-read-test
-        #run: mysql -e 'CREATE DATABASE sharding-read-test' -ugorm -pgorm
 
       - name: Create Write Database
         run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-write-test
-        #run: mysql -e 'CREATE DATABASE sharding-write-test' -ugorm -pgorm
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v3
@@ -125,7 +131,7 @@ jobs:
 
     strategy:
       matrix:
-        dbversion: ["mariadb:latest"]
+        dbversion: ["mariadb:10.11"]
         platform: [ubuntu-latest]
     runs-on: ${{ matrix.platform }}
 
@@ -148,9 +154,10 @@ jobs:
 
     env:
       DIALECTOR: mariadb
-      DATABASE_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4&parseTime=True&loc=Local
-      DATABASE_READ_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4&parseTime=True&loc=Local
-      DATABASE_WRITE_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4&parseTime=True&loc=Local
+      DB_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4&parseTime=True&loc=Local
+      DB_NOID_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-noid-test?charset=utf8mb4&parseTime=True&loc=Local
+      DB_READ_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4&parseTime=True&loc=Local
+      DB_WRITE_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4&parseTime=True&loc=Local
     steps:
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -158,13 +165,14 @@ jobs:
           go-version: "1.20"
         id: go
 
+      - name: Create No ID Database
+        run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-noid-test
+
       - name: Create Read Database
         run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-read-test
-        #run: mysql -e 'CREATE DATABASE sharding-read-test' -ugorm -pgorm
 
       - name: Create Write Database
         run: mysqladmin -h 127.0.0.1 -uroot -pgorm create sharding-write-test
-        #run: mysql -e 'CREATE DATABASE sharding-write-test' -ugorm -pgorm
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v3

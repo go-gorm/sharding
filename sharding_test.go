@@ -29,72 +29,93 @@ type Category struct {
 	Name string
 }
 
-func databaseURL() string {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if len(databaseURL) == 0 {
-		databaseURL = "postgres://localhost:5432/sharding-test?sslmode=disable"
+func dbURL() string {
+	dbURL := os.Getenv("DB_URL")
+	if len(dbURL) == 0 {
+		dbURL = "postgres://localhost:5432/sharding-test?sslmode=disable"
 		if mysqlDialector() {
-			databaseURL = "root@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4"
+			dbURL = "root@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4"
 		}
 	}
-	return databaseURL
+	return dbURL
 }
 
-func databaseReadURL() string {
-	databaseURL := os.Getenv("DATABASE_READ_URL")
-	if len(databaseURL) == 0 {
-		databaseURL = "postgres://localhost:5432/sharding-read-test?sslmode=disable"
+func dbNoIDURL() string {
+	dbURL := os.Getenv("DB_NOID_URL")
+	if len(dbURL) == 0 {
+		dbURL = "postgres://localhost:5432/sharding-noid-test?sslmode=disable"
 		if mysqlDialector() {
-			databaseURL = "root@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4"
+			dbURL = "root@tcp(127.0.0.1:3306)/sharding-noid-test?charset=utf8mb4"
 		}
 	}
-	return databaseURL
+	return dbURL
 }
 
-func databaseWriteURL() string {
-	databaseURL := os.Getenv("DATABASE_WRITE_URL")
-	if len(databaseURL) == 0 {
-		databaseURL = "postgres://localhost:5432/sharding-write-test?sslmode=disable"
+func dbReadURL() string {
+	dbURL := os.Getenv("DB_READ_URL")
+	if len(dbURL) == 0 {
+		dbURL = "postgres://localhost:5432/sharding-read-test?sslmode=disable"
 		if mysqlDialector() {
-			databaseURL = "root@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4"
+			dbURL = "root@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4"
 		}
 	}
-	return databaseURL
+	return dbURL
+}
+
+func dbWriteURL() string {
+	dbURL := os.Getenv("DB_WRITE_URL")
+	if len(dbURL) == 0 {
+		dbURL = "postgres://localhost:5432/sharding-write-test?sslmode=disable"
+		if mysqlDialector() {
+			dbURL = "root@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4"
+		}
+	}
+	return dbURL
 }
 
 var (
 	dbConfig = postgres.Config{
-		DSN:                  databaseURL(),
+		DSN:                  dbURL(),
+		PreferSimpleProtocol: true,
+	}
+	dbNoIDConfig = postgres.Config{
+		DSN:                  dbNoIDURL(),
 		PreferSimpleProtocol: true,
 	}
 	dbReadConfig = postgres.Config{
-		DSN:                  databaseReadURL(),
+		DSN:                  dbReadURL(),
 		PreferSimpleProtocol: true,
 	}
 	dbWriteConfig = postgres.Config{
-		DSN:                  databaseWriteURL(),
+		DSN:                  dbWriteURL(),
 		PreferSimpleProtocol: true,
 	}
-	db, dbRead, dbWrite *gorm.DB
+	db, dbNoID, dbRead, dbWrite *gorm.DB
 
-	shardingConfig Config
-	middleware     *Sharding
-	node, _        = snowflake.NewNode(1)
+	shardingConfig, shardingConfigNoID Config
+	middleware, middlewareNoID         *Sharding
+	node, _                            = snowflake.NewNode(1)
 )
 
 func init() {
 	if mysqlDialector() {
-		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
+		db, _ = gorm.Open(mysql.Open(dbURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
-		dbRead, _ = gorm.Open(mysql.Open(databaseReadURL()), &gorm.Config{
+		dbNoID, _ = gorm.Open(mysql.Open(dbNoIDURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
-		dbWrite, _ = gorm.Open(mysql.Open(databaseWriteURL()), &gorm.Config{
+		dbRead, _ = gorm.Open(mysql.Open(dbReadURL()), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+		dbWrite, _ = gorm.Open(mysql.Open(dbWriteURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
 	} else {
 		db, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+		dbNoID, _ = gorm.Open(postgres.New(dbNoIDConfig), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
 		dbRead, _ = gorm.Open(postgres.New(dbReadConfig), &gorm.Config{
@@ -112,7 +133,18 @@ func init() {
 		PrimaryKeyGenerator: PKSnowflake,
 	}
 
+	shardingConfigNoID = Config{
+		DoubleWrite:         true,
+		ShardingKey:         "user_id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKCustom,
+		PrimaryKeyGeneratorFn: func(_ int64) int64 {
+			return 0
+		},
+	}
+
 	middleware = Register(shardingConfig, &Order{})
+	middlewareNoID = Register(shardingConfigNoID, &Order{})
 
 	fmt.Println("Clean only tables ...")
 	dropTables()
@@ -125,6 +157,10 @@ func init() {
 	for _, table := range stables {
 		db.Exec(`CREATE TABLE ` + table + ` (
 			id bigint PRIMARY KEY,
+			user_id bigint,
+			product text
+		)`)
+		dbNoID.Exec(`CREATE TABLE ` + table + ` (
 			user_id bigint,
 			product text
 		)`)
@@ -141,12 +177,14 @@ func init() {
 	}
 
 	db.Use(middleware)
+	dbNoID.Use(middlewareNoID)
 }
 
 func dropTables() {
 	tables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories"}
 	for _, table := range tables {
 		db.Exec("DROP TABLE IF EXISTS " + table)
+		dbNoID.Exec("DROP TABLE IF EXISTS " + table)
 		dbRead.Exec("DROP TABLE IF EXISTS " + table)
 		dbWrite.Exec("DROP TABLE IF EXISTS " + table)
 		db.Exec(("DROP SEQUENCE IF EXISTS gorm_sharding_" + table + "_id_seq"))
@@ -181,6 +219,12 @@ func TestMigrate(t *testing.T) {
 func TestInsert(t *testing.T) {
 	tx := db.Create(&Order{ID: 100, UserID: 100, Product: "iPhone"})
 	assertQueryResult(t, `INSERT INTO orders_0 ("user_id", "product", "id") VALUES ($1, $2, $3) RETURNING "id"`, tx)
+}
+
+func TestInsertNoID(t *testing.T) {
+	dbNoID.Create(&Order{UserID: 100, Product: "iPhone"})
+	expected := `INSERT INTO orders_0 ("user_id", "product") VALUES ($1, $2) RETURNING "id"`
+	assert.Equal(t, toDialect(expected), middlewareNoID.LastQuery())
 }
 
 func TestFillID(t *testing.T) {
@@ -266,8 +310,15 @@ func TestSelect12(t *testing.T) {
 }
 
 func TestSelect13(t *testing.T) {
-	tx := db.Raw("SELECT 1").Find(&[]Order{})
+	var n int
+	tx := db.Raw("SELECT 1").Find(&n)
 	assertQueryResult(t, `SELECT 1`, tx)
+}
+
+func TestSelect14(t *testing.T) {
+	dbNoID.Model(&Order{}).Where("user_id = 101").Find(&[]Order{})
+	expected := `SELECT * FROM orders_1 WHERE user_id = 101`
+	assert.Equal(t, toDialect(expected), middlewareNoID.LastQuery())
 }
 
 func TestUpdate(t *testing.T) {
@@ -325,7 +376,7 @@ func TestNoSharding(t *testing.T) {
 func TestPKSnowflake(t *testing.T) {
 	var db *gorm.DB
 	if mysqlDialector() {
-		db, _ = gorm.Open(mysql.Open(databaseURL()), &gorm.Config{
+		db, _ = gorm.Open(mysql.Open(dbURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
 	} else {
@@ -370,7 +421,7 @@ func TestReadWriteSplitting(t *testing.T) {
 
 	var db *gorm.DB
 	if mysqlDialector() {
-		db, _ = gorm.Open(mysql.Open(databaseWriteURL()), &gorm.Config{
+		db, _ = gorm.Open(mysql.Open(dbWriteURL()), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
 		})
 	} else {

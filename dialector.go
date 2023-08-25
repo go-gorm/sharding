@@ -33,7 +33,7 @@ func (d ShardingDialector) Migrator(db *gorm.DB) gorm.Migrator {
 	}
 }
 
-func (m ShardingMigrator) AutoMigrate(dst ...interface{}) error {
+func (m ShardingMigrator) AutoMigrate(dst ...any) error {
 	shardingDsts, noShardingDsts, err := m.splitShardingDsts(dst...)
 	if err != nil {
 		return err
@@ -61,7 +61,7 @@ func (m ShardingMigrator) AutoMigrate(dst ...interface{}) error {
 	return nil
 }
 
-func (m ShardingMigrator) DropTable(dst ...interface{}) error {
+func (m ShardingMigrator) DropTable(dst ...any) error {
 	shardingDsts, noShardingDsts, err := m.splitShardingDsts(dst...)
 	if err != nil {
 		return err
@@ -84,15 +84,15 @@ func (m ShardingMigrator) DropTable(dst ...interface{}) error {
 
 type shardingDst struct {
 	table string
-	dst   interface{}
+	dst   any
 }
 
 // splite sharding or normal dsts
-func (m ShardingMigrator) splitShardingDsts(dsts ...interface{}) (shardingDsts []shardingDst,
-	noShardingDsts []interface{}, err error) {
+func (m ShardingMigrator) splitShardingDsts(dsts ...any) (shardingDsts []shardingDst,
+	noShardingDsts []any, err error) {
 
 	shardingDsts = make([]shardingDst, 0)
-	noShardingDsts = make([]interface{}, 0)
+	noShardingDsts = make([]any, 0)
 	for _, model := range dsts {
 		stmt := &gorm.Statement{DB: m.sharding.DB}
 		err = stmt.Parse(model)

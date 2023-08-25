@@ -32,10 +32,10 @@ type Sharding struct {
 	snowflakeNodes []*snowflake.Node
 
 	_config Config
-	_tables []interface{}
+	_tables []any
 }
 
-//  Config specifies the configuration for sharding.
+// Config specifies the configuration for sharding.
 type Config struct {
 	// When DoubleWrite enabled, data will double write to both main table and sharding table.
 	DoubleWrite bool
@@ -54,13 +54,13 @@ type Config struct {
 	// table's suffix by the column value.
 	// For example, this function implements a mod sharding algorithm.
 	//
-	// 	func(value interface{}) (suffix string, err error) {
+	// 	func(value any) (suffix string, err error) {
 	//		if uid, ok := value.(int64);ok {
 	//			return fmt.Sprintf("_%02d", user_id % 64), nil
 	//		}
 	//		return "", errors.New("invalid user_id")
 	// 	}
-	ShardingAlgorithm func(columnValue interface{}) (suffix string, err error)
+	ShardingAlgorithm func(columnValue any) (suffix string, err error)
 
 	// ShardingSuffixs specifies a function to generate all table's suffix.
 	// Used to support Migrator and generate PrimaryKey.
@@ -93,6 +93,7 @@ type Config struct {
 	// PrimaryKeyGeneratorFn specifies a function to generate the primary key.
 	// When use auto-increment like generator, the tableIdx argument could ignored.
 	// For example, this function use the Snowflake library to generate the primary key.
+	// If you don't want to auto-fill the `id` or use a primary key that isn't called `id`, just return 0.
 	//
 	// 	func(tableIdx int64) int64 {
 	//		return nodes[tableIdx].Generate().Int64()
@@ -100,7 +101,7 @@ type Config struct {
 	PrimaryKeyGeneratorFn func(tableIdx int64) int64
 }
 
-func Register(config Config, tables ...interface{}) *Sharding {
+func Register(config Config, tables ...any) *Sharding {
 	return &Sharding{
 		_config: config,
 		_tables: tables,
@@ -163,7 +164,7 @@ func (s *Sharding) compile() error {
 			} else if c.NumberOfShards < 10000 {
 				c.tableFormat = "_%04d"
 			}
-			c.ShardingAlgorithm = func(value interface{}) (suffix string, err error) {
+			c.ShardingAlgorithm = func(value any) (suffix string, err error) {
 				id := 0
 				switch value := value.(type) {
 				case int:
@@ -271,7 +272,7 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 }
 
 // resolve split the old query to full table query and sharding table query
-func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName string, err error) {
+func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableName string, err error) {
 	ftQuery = query
 	stQuery = query
 	if len(s.configs) == 0 {
@@ -287,7 +288,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	var condition sqlparser.Expr
 	var isInsert bool
 	var insertNames []*sqlparser.Ident
-	var inserExpressions []*sqlparser.Exprs
+	var insertExpressions []*sqlparser.Exprs
 	var insertStmt *sqlparser.InsertStatement
 
 	switch stmt := expr.(type) {
@@ -305,7 +306,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		table = stmt.TableName
 		isInsert = true
 		insertNames = stmt.ColumnNames
-		inserExpressions = stmt.Expressions
+		insertExpressions = stmt.Expressions
 		insertStmt = stmt
 	case *sqlparser.UpdateStatement:
 		condition = stmt.Condition
@@ -326,12 +327,12 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	var suffix string
 	if isInsert {
 		var newTable *sqlparser.TableName
-		for _, inserExpression := range inserExpressions {
-			var value interface{}
+		for _, insertExpression := range insertExpressions {
+			var value any
 			var id int64
 			var keyFind bool
 			columnNames := insertNames
-			insertValues := inserExpression.Exprs
+			insertValues := insertExpression.Exprs
 			value, id, keyFind, err = s.insertValue(r.ShardingKey, insertNames, insertValues, args...)
 			if err != nil {
 				return
@@ -360,17 +361,22 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 						break
 					}
 				}
-				if fillID {
-					suffixWord := strings.Replace(suffix, "_", "", 1)
-					tblIdx, err := strconv.Atoi(suffixWord)
-					if err != nil {
-						tblIdx = slices.Index(r.ShardingSuffixs(), suffixWord)
-						if tblIdx == -1 {
-							return ftQuery, stQuery, tableName, errors.New("table suffix '" + suffixWord + "' is not in ShardingSuffixs. In order to generate the primary key, ShardingSuffixs should include all table suffixes")
-						}
-						//return ftQuery, stQuery, tableName, err
+				suffixWord := strings.Replace(suffix, "_", "", 1)
+				tblIdx, err := strconv.Atoi(suffixWord)
+				if err != nil {
+					tblIdx = slices.Index(r.ShardingSuffixs(), suffixWord)
+					if tblIdx == -1 {
+						return ftQuery, stQuery, tableName, errors.New("table suffix '" + suffixWord + "' is not in ShardingSuffixs. In order to generate the primary key, ShardingSuffixs should include all table suffixes")
 					}
-					id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
+					//return ftQuery, stQuery, tableName, err
+				}
+
+				id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
+				if id == 0 {
+					fillID = false
+				}
+
+				if fillID {
 					columnNames = append(insertNames, &sqlparser.Ident{Name: "id"})
 					insertValues = append(insertValues, &sqlparser.NumberLit{Value: strconv.FormatInt(id, 10)})
 				}
@@ -378,7 +384,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 			if fillID {
 				insertStmt.ColumnNames = columnNames
-				inserExpression.Exprs = insertValues
+				insertExpression.Exprs = insertValues
 			}
 		}
 
@@ -387,7 +393,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		stQuery = insertStmt.String()
 
 	} else {
-		var value interface{}
+		var value any
 		var id int64
 		var keyFind bool
 		value, id, keyFind, err = s.nonInsertValue(r.ShardingKey, condition, args...)
@@ -422,7 +428,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	return
 }
 
-func getSuffix(value interface{}, id int64, keyFind bool, r Config) (suffix string, err error) {
+func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err error) {
 	if keyFind {
 		suffix, err = r.ShardingAlgorithm(value)
 		if err != nil {
@@ -438,7 +444,7 @@ func getSuffix(value interface{}, id int64, keyFind bool, r Config) (suffix stri
 	return
 }
 
-func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
+func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sqlparser.Expr, args ...any) (value any, id int64, keyFind bool, err error) {
 	if len(names) != len(exprs) {
 		return nil, 0, keyFind, errors.New("column names and expressions mismatch")
 	}
@@ -466,7 +472,7 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 	return
 }
 
-func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...interface{}) (value interface{}, id int64, keyFind bool, err error) {
+func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...any) (value any, id int64, keyFind bool, err error) {
 	err = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
 		if n, ok := node.(*sqlparser.BinaryExpr); ok {
 			if x, ok := n.X.(*sqlparser.Ident); ok {
