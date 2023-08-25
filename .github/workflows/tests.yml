@@ -98,7 +98,7 @@ jobs:
     env:
       DIALECTOR: mysql
       DB_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4&parseTime=True&loc=Local
-      DB_NOID_URL: gorm:gorm@tcp(127.0.0.1:3306)/sharding-noid-test?charset=utf8mb4&parseTime=True&loc=Local
+      DB_NOID_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-noid-test?charset=utf8mb4&parseTime=True&loc=Local
       DB_READ_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4&parseTime=True&loc=Local
       DB_WRITE_URL: root:gorm@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4&parseTime=True&loc=Local
     steps:
