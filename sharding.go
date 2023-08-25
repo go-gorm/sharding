@@ -33,8 +33,8 @@ type Sharding struct {
 
 	_config Config
 	_tables []any
-  
-  mutex sync.RWMutex
+	
+	mutex sync.RWMutex
 }
 
 // Config specifies the configuration for sharding.
