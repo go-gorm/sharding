@@ -389,9 +389,9 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 				suffixWord := strings.Replace(suffix, "_", "", 1)
 				tblIdx, err := strconv.Atoi(suffixWord)
 				if err != nil {
-					tblIdx = slices.Index(r.ShardingSuffixs(), suffixWord)
+					tblIdx = slices.Index(r.ShardingSuffixs(), suffix)
 					if tblIdx == -1 {
-						return ftQuery, stQuery, tableName, errors.New("table suffix '" + suffixWord + "' is not in ShardingSuffixs. In order to generate the primary key, ShardingSuffixs should include all table suffixes")
+						return ftQuery, stQuery, tableName, errors.New("table suffix '" + suffix + "' is not in ShardingSuffixs. In order to generate the primary key, ShardingSuffixs should include all table suffixes")
 					}
 					//return ftQuery, stQuery, tableName, err
 				}
