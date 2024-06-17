@@ -7,9 +7,9 @@ require (
 	github.com/longbridgeapp/assert v1.1.0
 	github.com/longbridgeapp/sqlparser v0.3.1
 	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63
-	gorm.io/driver/mysql v1.5.1
+	gorm.io/driver/mysql v1.5.7
 	gorm.io/driver/postgres v1.5.2
-	gorm.io/gorm v1.25.4
+	gorm.io/gorm v1.25.7
 	gorm.io/hints v1.1.2
 	gorm.io/plugin/dbresolver v1.5.1
 )
