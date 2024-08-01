@@ -500,7 +500,14 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...any) (value any, id int64, keyFind bool, err error) {
 	err = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
 		if n, ok := node.(*sqlparser.BinaryExpr); ok {
-			if x, ok := n.X.(*sqlparser.Ident); ok {
+			x, ok := n.X.(*sqlparser.Ident)
+			if !ok {
+				if q, ok2 := n.X.(*sqlparser.QualifiedRef); ok2 {
+					x = q.Column
+					ok = true
+				}
+			}
+			if ok {
 				if x.Name == key && n.Op == sqlparser.EQ {
 					keyFind = true
 					switch expr := n.Y.(type) {
