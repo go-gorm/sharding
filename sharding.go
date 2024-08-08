@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -430,6 +431,7 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 		ftQuery = insertStmt.String()
 		insertStmt.TableName = newTable
 		stQuery = insertStmt.String()
+		slog.Debug(stQuery)
 
 	} else {
 		var value any
@@ -465,6 +467,7 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 			replaceConditionTableName(r.ShardingKey, newTable.Name.Name, stmt.Condition)
 			stQuery = stmt.String()
 		}
+		slog.Debug(stQuery)
 	}
 
 	return
