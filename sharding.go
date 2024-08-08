@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -295,6 +296,20 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 		s.mutex.Unlock()
 	}
 }
+func replaceConditionTableName(key, tableName string, expr sqlparser.Expr) error {
+
+	err := sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
+		if n, ok := node.(*sqlparser.BinaryExpr); ok {
+			if q, ok2 := n.X.(*sqlparser.QualifiedRef); ok2 {
+				if q.Column.Name == key {
+					n.X.(*sqlparser.QualifiedRef).Table.Name = tableName
+				}
+			}
+		}
+		return nil
+	}), expr)
+	return err
+}
 
 // resolve split the old query to full table query and sharding table query
 func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableName string, err error) {
@@ -416,6 +431,7 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 		ftQuery = insertStmt.String()
 		insertStmt.TableName = newTable
 		stQuery = insertStmt.String()
+		slog.Debug(stQuery)
 
 	} else {
 		var value any
@@ -438,16 +454,20 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 			ftQuery = stmt.String()
 			stmt.FromItems = newTable
 			stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
+			replaceConditionTableName(r.ShardingKey, newTable.Name.Name, stmt.Condition)
 			stQuery = stmt.String()
 		case *sqlparser.UpdateStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
+			replaceConditionTableName(r.ShardingKey, newTable.Name.Name, stmt.Condition)
 			stQuery = stmt.String()
 		case *sqlparser.DeleteStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
+			replaceConditionTableName(r.ShardingKey, newTable.Name.Name, stmt.Condition)
 			stQuery = stmt.String()
 		}
+		slog.Debug(stQuery)
 	}
 
 	return
