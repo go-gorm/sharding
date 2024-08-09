@@ -31,11 +31,11 @@ func main() {
 		)`)
 	}
 
-	middleware := sharding.Register(sharding.Config{
+	middleware := sharding.Register(map[any]sharding.Config{"orders": {
 		ShardingKey:         "user_id",
 		NumberOfShards:      64,
 		PrimaryKeyGenerator: sharding.PKSnowflake,
-	}, "orders")
+	}})
 	db.Use(middleware)
 
 	// this record will insert to orders_02

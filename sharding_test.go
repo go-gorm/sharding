@@ -145,8 +145,8 @@ func init() {
 		},
 	}
 
-	middleware = Register(shardingConfig, &Order{})
-	middlewareNoID = Register(shardingConfigNoID, &Order{})
+	middleware = Register(map[any]Config{&Order{}: shardingConfig})
+	middlewareNoID = Register(map[any]Config{&Order{}: shardingConfigNoID})
 
 	fmt.Println("Clean only tables ...")
 	dropTables()
@@ -391,7 +391,7 @@ func TestPKSnowflake(t *testing.T) {
 		})
 	}
 	shardingConfig.PrimaryKeyGenerator = PKSnowflake
-	middleware := Register(shardingConfig, &Order{})
+	middleware := Register(map[any]Config{&Order{}: shardingConfig})
 	db.Use(middleware)
 
 	node, _ := snowflake.NewNode(0)
@@ -412,7 +412,7 @@ func TestPKPGSequence(t *testing.T) {
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	shardingConfig.PrimaryKeyGenerator = PKPGSequence
-	middleware := Register(shardingConfig, &Order{})
+	middleware := Register(map[any]Config{&Order{}: shardingConfig})
 	db.Use(middleware)
 
 	db.Exec("SELECT setval('" + pgSeqName("orders") + "', 42)")
@@ -430,7 +430,7 @@ func TestPKMySQLSequence(t *testing.T) {
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	shardingConfig.PrimaryKeyGenerator = PKMySQLSequence
-	middleware := Register(shardingConfig, &Order{})
+	middleware := Register(map[any]Config{&Order{}: shardingConfig})
 	db.Use(middleware)
 
 	db.Exec("UPDATE `" + mySQLSeqName("orders") + "` SET id = 42")
