@@ -107,7 +107,7 @@ func (m ShardingMigrator) splitShardingDsts(dsts ...any) (shardingDsts []shardin
 			return
 		}
 
-		if cfg, ok := m.sharding.configs[stmt.Table]; ok {
+		if cfg, ok := m.sharding.Configs[stmt.Table]; ok {
 			// support sharding table
 			suffixs := cfg.ShardingSuffixs()
 			if len(suffixs) == 0 {
