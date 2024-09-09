@@ -5,7 +5,7 @@ go 1.21
 require (
 	github.com/bwmarrin/snowflake v0.3.0
 	github.com/longbridgeapp/assert v1.1.0
-	github.com/longbridgeapp/sqlparser v0.3.1
+	github.com/longbridgeapp/sqlparser v0.3.2
 	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63
 	gorm.io/driver/mysql v1.5.1
 	gorm.io/driver/postgres v1.5.2
