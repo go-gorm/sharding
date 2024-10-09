@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/bwmarrin/snowflake"
-	"github.com/longbridgeapp/sqlparser"
 	pg_query "github.com/pganalyze/pg_query_go/v5"
 	"gorm.io/gorm"
 	"hash/crc32"
@@ -619,102 +618,4 @@ func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err 
 		suffix = r.ShardingAlgorithmByPrimaryKey(id)
 	}
 	return
-}
-
-func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sqlparser.Expr, args ...any) (value any, id int64, keyFind bool, err error) {
-	if len(names) != len(exprs) {
-		return nil, 0, keyFind, errors.New("column names and expressions mismatch")
-	}
-
-	for i, name := range names {
-		if name.Name == key {
-			switch expr := exprs[i].(type) {
-			case *sqlparser.BindExpr:
-				value = args[expr.Pos]
-			case *sqlparser.StringLit:
-				value = expr.Value
-			case *sqlparser.NumberLit:
-				value = expr.Value
-			default:
-				return nil, 0, keyFind, sqlparser.ErrNotImplemented
-			}
-			keyFind = true
-			break
-		}
-	}
-	if !keyFind {
-		return nil, 0, keyFind, ErrMissingShardingKey
-	}
-
-	return
-}
-
-func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...any) (value any, id int64, keyFind bool, err error) {
-	err = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
-		if n, ok := node.(*sqlparser.BinaryExpr); ok {
-			x, ok := n.X.(*sqlparser.Ident)
-			if !ok {
-				if q, ok2 := n.X.(*sqlparser.QualifiedRef); ok2 {
-					x = q.Column
-					ok = true
-				}
-			}
-			if ok {
-				if x.Name == key && n.Op == sqlparser.EQ {
-					keyFind = true
-					switch expr := n.Y.(type) {
-					case *sqlparser.BindExpr:
-						value = args[expr.Pos]
-					case *sqlparser.StringLit:
-						value = expr.Value
-					case *sqlparser.NumberLit:
-						value = expr.Value
-					default:
-						return sqlparser.ErrNotImplemented
-					}
-					return nil
-				} else if x.Name == "id" && n.Op == sqlparser.EQ {
-					switch expr := n.Y.(type) {
-					case *sqlparser.BindExpr:
-						v := args[expr.Pos]
-						var ok bool
-						if id, ok = v.(int64); !ok {
-							return fmt.Errorf("ID should be int64 type")
-						}
-					case *sqlparser.NumberLit:
-						id, err = strconv.ParseInt(expr.Value, 10, 64)
-						if err != nil {
-							return err
-						}
-					default:
-						return ErrInvalidID
-					}
-					return nil
-				}
-			}
-		}
-		return nil
-	}), condition)
-	if err != nil {
-		return
-	}
-
-	if !keyFind && id == 0 {
-		return nil, 0, keyFind, ErrMissingShardingKey
-	}
-
-	return
-}
-
-func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName string) []*sqlparser.OrderingTerm {
-	for i, term := range orderBy {
-		if x, ok := term.X.(*sqlparser.QualifiedRef); ok {
-			if x.Table.Name == oldName {
-				x.Table.Name = newName
-				orderBy[i].X = x
-			}
-		}
-	}
-
-	return orderBy
 }
