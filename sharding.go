@@ -3,15 +3,13 @@ package sharding
 import (
 	"errors"
 	"fmt"
-	"hash/crc32"
-	"strconv"
-	"strings"
-	"sync"
-
 	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/sqlparser"
-	"golang.org/x/exp/slices"
+	pg_query "github.com/pganalyze/pg_query_go/v5"
 	"gorm.io/gorm"
+	"hash/crc32"
+	"strconv"
+	"sync"
 )
 
 var (
@@ -297,160 +295,314 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 }
 
 // resolve split the old query to full table query and sharding table query
-func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableName string, err error) {
+func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName string, err error) {
 	ftQuery = query
 	stQuery = query
 	if len(s.configs) == 0 {
 		return
 	}
 
-	expr, err := sqlparser.NewParser(strings.NewReader(query)).ParseStatement()
+	// Parse the SQL query using pg_query_go
+	parsed, err := pg_query.Parse(query)
 	if err != nil {
-		return ftQuery, stQuery, tableName, nil
+		return ftQuery, stQuery, tableName, fmt.Errorf("error parsing query: %v", err)
 	}
 
-	var table *sqlparser.TableName
-	var condition sqlparser.Expr
+	if len(parsed.Stmts) == 0 {
+		return ftQuery, stQuery, tableName, fmt.Errorf("no statements found in query")
+	}
+
+	// We will assume single-statement queries for simplicity
+	stmt := parsed.Stmts[0]
+
+	// Initialize variables
+	var tables []string
 	var isInsert bool
-	var insertNames []*sqlparser.Ident
-	var insertExpressions []*sqlparser.Exprs
-	var insertStmt *sqlparser.InsertStatement
+	var insertStmt *pg_query.InsertStmt
+	var conditions []*pg_query.Node
 
-	switch stmt := expr.(type) {
-	case *sqlparser.SelectStatement:
-		tbl, ok := stmt.FromItems.(*sqlparser.TableName)
-		if !ok {
-			return
+	// Process the parsed statement to extract tables and conditions
+	switch stmtNode := stmt.Stmt.Node.(type) {
+	case *pg_query.Node_SelectStmt:
+		selectStmt := stmtNode.SelectStmt
+		tables = collectTablesFromSelect(selectStmt)
+		if selectStmt.WhereClause != nil {
+			conditions = append(conditions, selectStmt.WhereClause)
 		}
-		if stmt.Hint != nil && stmt.Hint.Value == "nosharding" {
-			return
-		}
-		table = tbl
-		condition = stmt.Condition
-	case *sqlparser.InsertStatement:
-		table = stmt.TableName
+	case *pg_query.Node_InsertStmt:
 		isInsert = true
-		insertNames = stmt.ColumnNames
-		insertExpressions = stmt.Expressions
-		insertStmt = stmt
-	case *sqlparser.UpdateStatement:
-		condition = stmt.Condition
-		table = stmt.TableName
-	case *sqlparser.DeleteStatement:
-		condition = stmt.Condition
-		table = stmt.TableName
+		insertStmt = stmtNode.InsertStmt
+		if insertStmt.Relation != nil {
+			tables = []string{insertStmt.Relation.Relname}
+		} else {
+			return ftQuery, stQuery, tableName, fmt.Errorf("unexpected node type in InsertStmt.Relation")
+		}
+	case *pg_query.Node_UpdateStmt:
+		updateStmt := stmtNode.UpdateStmt
+		if updateStmt.Relation != nil {
+			tables = []string{updateStmt.Relation.Relname}
+			if updateStmt.WhereClause != nil {
+				conditions = append(conditions, updateStmt.WhereClause)
+			}
+		} else {
+			return ftQuery, stQuery, tableName, fmt.Errorf("unexpected node type in UpdateStmt.Relation")
+		}
+	case *pg_query.Node_DeleteStmt:
+		deleteStmt := stmtNode.DeleteStmt
+		if deleteStmt.Relation != nil {
+			tables = []string{deleteStmt.Relation.Relname}
+			if deleteStmt.WhereClause != nil {
+				conditions = append(conditions, deleteStmt.WhereClause)
+			}
+		} else {
+			return ftQuery, stQuery, tableName, fmt.Errorf("unexpected node type in DeleteStmt.Relation")
+		}
 	default:
-		return ftQuery, stQuery, "", sqlparser.ErrNotImplemented
+		return ftQuery, stQuery, "", fmt.Errorf("unsupported statement type")
 	}
 
-	tableName = table.Name.Name
-	r, ok := s.configs[tableName]
-	if !ok {
-		return
+	// Process tables and conditions to update with sharded table names
+	tableMap := make(map[string]string) // originalTableName -> shardedTableName
+	for _, originalTableName := range tables {
+		r, ok := s.configs[originalTableName]
+		if !ok {
+			continue // Skip tables that are not sharded
+		}
+
+		var suffix string
+		if isInsert {
+			// Handle insert statements
+			value, id, keyFound, err := s.extractInsertShardingKey(r, insertStmt, args...)
+			if err != nil {
+				return ftQuery, stQuery, tableName, err
+			}
+
+			suffix, err = getSuffix(value, id, keyFound, r)
+			if err != nil {
+				return ftQuery, stQuery, tableName, err
+			}
+
+			shardedTableName := originalTableName + suffix
+			tableMap[originalTableName] = shardedTableName
+
+			// Update the table name in the insert statement
+			if insertStmt.Relation != nil {
+				insertStmt.Relation.Relname = shardedTableName
+			}
+		} else {
+			// Handle non-insert statements (SELECT, UPDATE, DELETE)
+			value, id, keyFound, err := s.extractShardingKeyFromConditions(r, conditions, args...)
+			if err != nil {
+				return ftQuery, stQuery, tableName, err
+			}
+
+			suffix, err = getSuffix(value, id, keyFound, r)
+			if err != nil {
+				return ftQuery, stQuery, tableName, err
+			}
+
+			shardedTableName := originalTableName + suffix
+			tableMap[originalTableName] = shardedTableName
+		}
 	}
 
-	var suffix string
-	if isInsert {
-		var newTable *sqlparser.TableName
-		for _, insertExpression := range insertExpressions {
-			var value any
-			var id int64
-			var keyFind bool
-			columnNames := insertNames
-			insertValues := insertExpression.Exprs
-			value, id, keyFind, err = s.insertValue(r.ShardingKey, insertNames, insertValues, args...)
-			if err != nil {
-				return
-			}
+	// Now, traverse the AST and replace any references to the original table names with sharded table names
+	replaceTableNames(stmt.Stmt, tableMap)
 
-			var subSuffix string
-			subSuffix, err = getSuffix(value, id, keyFind, r)
-			if err != nil {
-				return
-			}
-
-			if suffix != "" && suffix != subSuffix {
-				err = ErrInsertDiffSuffix
-				return
-			}
-
-			suffix = subSuffix
-
-			newTable = &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
-
-			fillID := true
-			if isInsert {
-				for _, name := range insertNames {
-					if name.Name == "id" {
-						fillID = false
-						break
-					}
-				}
-				suffixWord := strings.Replace(suffix, "_", "", 1)
-				tblIdx, err := strconv.Atoi(suffixWord)
-				if err != nil {
-					tblIdx = slices.Index(r.ShardingSuffixs(), suffix)
-					if tblIdx == -1 {
-						return ftQuery, stQuery, tableName, errors.New("table suffix '" + suffix + "' is not in ShardingSuffixs. In order to generate the primary key, ShardingSuffixs should include all table suffixes")
-					}
-					//return ftQuery, stQuery, tableName, err
-				}
-
-				id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
-				if id == 0 {
-					fillID = false
-				}
-
-				if fillID {
-					columnNames = append(insertNames, &sqlparser.Ident{Name: "id"})
-					insertValues = append(insertValues, &sqlparser.NumberLit{Value: strconv.FormatInt(id, 10)})
-				}
-			}
-
-			if fillID {
-				insertStmt.ColumnNames = columnNames
-				insertExpression.Exprs = insertValues
-			}
-		}
-
-		ftQuery = insertStmt.String()
-		insertStmt.TableName = newTable
-		stQuery = insertStmt.String()
-
-	} else {
-		var value any
-		var id int64
-		var keyFind bool
-		value, id, keyFind, err = s.nonInsertValue(r.ShardingKey, condition, args...)
-		if err != nil {
-			return
-		}
-
-		suffix, err = getSuffix(value, id, keyFind, r)
-		if err != nil {
-			return
-		}
-
-		newTable := &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
-
-		switch stmt := expr.(type) {
-		case *sqlparser.SelectStatement:
-			ftQuery = stmt.String()
-			stmt.FromItems = newTable
-			stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
-			stQuery = stmt.String()
-		case *sqlparser.UpdateStatement:
-			ftQuery = stmt.String()
-			stmt.TableName = newTable
-			stQuery = stmt.String()
-		case *sqlparser.DeleteStatement:
-			ftQuery = stmt.String()
-			stmt.TableName = newTable
-			stQuery = stmt.String()
-		}
+	// Deparse the modified AST back to SQL
+	stmts := []*pg_query.RawStmt{stmt}
+	stQuery, err = pg_query.Deparse(&pg_query.ParseResult{Stmts: stmts})
+	if err != nil {
+		return ftQuery, stQuery, tableName, fmt.Errorf("error deparsing modified query: %v", err)
 	}
 
 	return
+}
+
+func collectTablesFromSelect(selectStmt *pg_query.SelectStmt) []string {
+	var tables []string
+	for _, fromItem := range selectStmt.FromClause {
+		switch node := fromItem.Node.(type) {
+		case *pg_query.Node_RangeVar:
+			tables = append(tables, node.RangeVar.Relname)
+		case *pg_query.Node_JoinExpr:
+			tables = append(tables, collectTablesFromJoin(node.JoinExpr)...)
+		}
+	}
+	return tables
+}
+
+func collectTablesFromJoin(joinExpr *pg_query.JoinExpr) []string {
+	var tables []string
+	if joinExpr.Larg != nil {
+		switch larg := joinExpr.Larg.Node.(type) {
+		case *pg_query.Node_RangeVar:
+			tables = append(tables, larg.RangeVar.Relname)
+		case *pg_query.Node_JoinExpr:
+			tables = append(tables, collectTablesFromJoin(larg.JoinExpr)...)
+		}
+	}
+	if joinExpr.Rarg != nil {
+		switch rarg := joinExpr.Rarg.Node.(type) {
+		case *pg_query.Node_RangeVar:
+			tables = append(tables, rarg.RangeVar.Relname)
+		case *pg_query.Node_JoinExpr:
+			tables = append(tables, collectTablesFromJoin(rarg.JoinExpr)...)
+		}
+	}
+	return tables
+}
+
+func (s *Sharding) extractInsertShardingKey(r Config, insertStmt *pg_query.InsertStmt, args ...interface{}) (value interface{}, id int64, keyFound bool, err error) {
+	if len(insertStmt.Cols) == 0 || insertStmt.SelectStmt == nil || len(insertStmt.SelectStmt.GetSelectStmt().ValuesLists) == 0 {
+		return nil, 0, false, errors.New("invalid insert statement structure")
+	}
+
+	colNames := insertStmt.Cols
+	valuesList := insertStmt.SelectStmt.GetSelectStmt().ValuesLists[0]
+
+	for i, colItem := range colNames {
+		colName := colItem.Node.(*pg_query.Node_ResTarget).ResTarget.Name
+		if colName == r.ShardingKey {
+			expr := valuesList.Node.(*pg_query.Node_List).List.Items[i]
+			value, err = extractValueFromExpr(expr, args)
+			if err != nil {
+				return nil, 0, false, err
+			}
+			keyFound = true
+			break
+		}
+	}
+	if !keyFound {
+		return nil, 0, false, ErrMissingShardingKey
+	}
+	return
+}
+
+func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
+	if node == nil {
+		return
+	}
+
+	switch n := node.Node.(type) {
+	case *pg_query.Node_RangeVar:
+		if newName, ok := tableMap[n.RangeVar.Relname]; ok {
+			n.RangeVar.Relname = newName
+		}
+	case *pg_query.Node_SelectStmt:
+		// Recurse into FROM clause
+		for _, item := range n.SelectStmt.FromClause {
+			replaceTableNames(item, tableMap)
+		}
+		// Recurse into target list (SELECT columns)
+		for _, target := range n.SelectStmt.TargetList {
+			replaceTableNames(target, tableMap)
+		}
+		// Recurse into WHERE clause
+		replaceTableNames(n.SelectStmt.WhereClause, tableMap)
+	case *pg_query.Node_JoinExpr:
+		replaceTableNames(n.JoinExpr.Larg, tableMap)
+		replaceTableNames(n.JoinExpr.Rarg, tableMap)
+		replaceTableNames(n.JoinExpr.Quals, tableMap)
+	case *pg_query.Node_ResTarget:
+		replaceTableNames(n.ResTarget.Val, tableMap)
+	case *pg_query.Node_ColumnRef:
+		// Update table name in column references
+		if len(n.ColumnRef.Fields) == 2 {
+			if tableNameNode, ok := n.ColumnRef.Fields[0].Node.(*pg_query.Node_String_); ok {
+				if newName, ok := tableMap[tableNameNode.String_.Sval]; ok {
+					tableNameNode.String_.Sval = newName
+				}
+			}
+		}
+	case *pg_query.Node_AExpr:
+		replaceTableNames(n.AExpr.Lexpr, tableMap)
+		replaceTableNames(n.AExpr.Rexpr, tableMap)
+	case *pg_query.Node_BoolExpr:
+		for _, arg := range n.BoolExpr.Args {
+			replaceTableNames(arg, tableMap)
+		}
+	}
+}
+
+func extractValueFromExpr(expr *pg_query.Node, args []interface{}) (interface{}, error) {
+	switch v := expr.Node.(type) {
+	case *pg_query.Node_ParamRef:
+		// Positional parameter; PostgreSQL parameters are 1-based
+		if v.ParamRef.Number > 0 && int(v.ParamRef.Number) <= len(args) {
+			return args[v.ParamRef.Number-1], nil
+		} else {
+			return nil, fmt.Errorf("parameter index out of range")
+		}
+	case *pg_query.Node_AConst:
+		switch val := v.AConst.Val.(type) {
+		case *pg_query.A_Const_Ival:
+			return val.Ival, nil
+		case *pg_query.A_Const_Fval:
+			return val.Fval, nil
+		case *pg_query.A_Const_Sval:
+			return val.Sval, nil
+		default:
+			return nil, fmt.Errorf("unsupported constant type")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported expression type")
+	}
+}
+
+func (s *Sharding) extractShardingKeyFromConditions(r Config, conditions []*pg_query.Node, args ...interface{}) (value interface{}, id int64, keyFound bool, err error) {
+	for _, condition := range conditions {
+		keyFound, value, err = traverseConditionForKey(r.ShardingKey, condition, args)
+		if keyFound || err != nil {
+			break
+		}
+	}
+	if !keyFound {
+		return nil, 0, false, ErrMissingShardingKey
+	}
+	return
+}
+
+func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []interface{}) (keyFound bool, value interface{}, err error) {
+	if node == nil {
+		return false, nil, nil
+	}
+	switch n := node.Node.(type) {
+	case *pg_query.Node_AExpr:
+		// Check if the expression is a simple equality
+		if n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_OP && len(n.AExpr.Name) > 0 {
+			opName := n.AExpr.Name[0].Node.(*pg_query.Node_String_).String_.Sval
+			if opName == "=" {
+				// Left and right sides
+				var columnName string
+				var exprValue *pg_query.Node
+
+				if colRef, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_ColumnRef); ok {
+					if len(colRef.ColumnRef.Fields) > 0 {
+						if colNameNode, ok := colRef.ColumnRef.Fields[len(colRef.ColumnRef.Fields)-1].Node.(*pg_query.Node_String_); ok {
+							columnName = colNameNode.String_.Sval
+						}
+					}
+				}
+				if columnName == shardingKey {
+					exprValue = n.AExpr.Rexpr
+					value, err = extractValueFromExpr(exprValue, args)
+					if err != nil {
+						return false, nil, err
+					}
+					return true, value, nil
+				}
+			}
+		}
+	case *pg_query.Node_BoolExpr:
+		for _, arg := range n.BoolExpr.Args {
+			keyFound, value, err = traverseConditionForKey(shardingKey, arg, args)
+			if keyFound || err != nil {
+				return keyFound, value, err
+			}
+		}
+	}
+	return false, nil, nil
 }
 
 func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err error) {
