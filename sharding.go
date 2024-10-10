@@ -7,6 +7,7 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v5"
 	"gorm.io/gorm"
 	"hash/crc32"
+	"reflect"
 	"strconv"
 	"sync"
 )
@@ -173,24 +174,32 @@ func (s *Sharding) compile() error {
 				c.tableFormat = "_%04d"
 			}
 			c.ShardingAlgorithm = func(value any) (suffix string, err error) {
-				id := 0
-				switch value := value.(type) {
-				case int:
-					id = value
-				case int64:
-					id = int(value)
+				var id int64
+				switch v := value.(type) {
+				case int, int64, int32, int16, int8:
+					id = reflect.ValueOf(v).Int()
+				case uint, uint64, uint32, uint16, uint8:
+					id = int64(reflect.ValueOf(v).Uint())
+				case float32, float64:
+					val := func(f float64) int64 {
+						if f < 0 {
+							return int64(f - 0.5)
+						}
+						return int64(f + 0.5)
+					}
+
+					id = val(v.(float64)) // Truncate float to int64
 				case string:
-					id, err = strconv.Atoi(value)
+					id, err = strconv.ParseInt(v, 10, 64)
 					if err != nil {
-						id = int(crc32.ChecksumIEEE([]byte(value)))
+						id = int64(crc32.ChecksumIEEE([]byte(v)))
 					}
 				default:
-					return "", fmt.Errorf("default algorithm only support integer and string column," +
-						"if you use other type, specify you own ShardingAlgorithm")
+					return "", fmt.Errorf("default algorithm only supports integer and string types")
 				}
-
-				return fmt.Sprintf(c.tableFormat, id%int(c.NumberOfShards)), nil
+				return fmt.Sprintf(c.tableFormat, id%int64(c.NumberOfShards)), nil
 			}
+
 		}
 
 		if c.ShardingSuffixs == nil {
@@ -211,8 +220,13 @@ func (s *Sharding) compile() error {
 				c.ShardingAlgorithmByPrimaryKey = func(id int64) (suffix string) {
 					return fmt.Sprintf(c.tableFormat, snowflake.ParseInt64(id).Node())
 				}
+			} else if c.PrimaryKeyGenerator == PKPGSequence || c.PrimaryKeyGenerator == PKMySQLSequence {
+				c.ShardingAlgorithmByPrimaryKey = func(id int64) (suffix string) {
+					return fmt.Sprintf(c.tableFormat, id%int64(c.NumberOfShards))
+				}
 			}
 		}
+
 		s.configs[t] = c
 	}
 
@@ -293,7 +307,7 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 	}
 }
 
-// resolve split the old query to full table query and sharding table query
+// resolve splits the old query into full table query and sharding table query
 func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName string, err error) {
 	ftQuery = query
 	stQuery = query
@@ -311,7 +325,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		return ftQuery, stQuery, tableName, fmt.Errorf("no statements found in query")
 	}
 
-	// We will assume single-statement queries for simplicity
+	// Assume single-statement queries
 	stmt := parsed.Stmts[0]
 
 	// Initialize variables
@@ -356,6 +370,17 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		} else {
 			return ftQuery, stQuery, tableName, fmt.Errorf("unexpected node type in DeleteStmt.Relation")
 		}
+	// Handle DDL statements by returning the original query
+	case *pg_query.Node_CreateStmt,
+		*pg_query.Node_DropStmt,
+		*pg_query.Node_AlterTableStmt,
+		*pg_query.Node_TruncateStmt,
+		*pg_query.Node_RenameStmt,
+		*pg_query.Node_IndexStmt,
+		*pg_query.Node_CommentStmt,
+		*pg_query.Node_GrantStmt:
+		// DDL statements. Bypass sharding.
+		return query, query, "", nil
 	default:
 		return ftQuery, stQuery, "", fmt.Errorf("unsupported statement type")
 	}
@@ -371,14 +396,37 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		var suffix string
 		if isInsert {
 			// Handle insert statements
-			value, id, keyFound, err := s.extractInsertShardingKey(r, insertStmt, args...)
-			if err != nil {
-				return ftQuery, stQuery, tableName, err
+			var consistentSuffix string
+			suffixes := make(map[string]bool)
+
+			// Iterate through each values list to extract suffixes
+			for _, valuesList := range insertStmt.SelectStmt.GetSelectStmt().ValuesLists {
+				value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
+				if err != nil {
+					return ftQuery, stQuery, tableName, err
+				}
+
+				currentSuffix, err := getSuffix(value, id, keyFound, r)
+				if err != nil {
+					return ftQuery, stQuery, tableName, err
+				}
+
+				suffixes[currentSuffix] = true
+
+				// If more than one unique suffix is found, return an error
+				if len(suffixes) > 1 {
+					return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
+				}
+
+				// Capture the consistent suffix
+				consistentSuffix = currentSuffix
 			}
 
-			suffix, err = getSuffix(value, id, keyFound, r)
-			if err != nil {
-				return ftQuery, stQuery, tableName, err
+			// Ensure all suffixes are consistent
+			if len(suffixes) == 1 {
+				suffix = consistentSuffix
+			} else {
+				return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
 			}
 
 			shardedTableName := originalTableName + suffix
@@ -405,7 +453,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		}
 	}
 
-	// Now, traverse the AST and replace any references to the original table names with sharded table names
+	// Traverse the AST and replace original table names with sharded table names
 	replaceTableNames(stmt.Stmt, tableMap)
 
 	// Deparse the modified AST back to SQL
@@ -416,6 +464,72 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	}
 
 	return
+}
+
+func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_query.InsertStmt, valuesList *pg_query.Node, args ...interface{}) (value interface{}, id int64, keyFound bool, err error) {
+	// Ensure that columns are specified
+	if len(insertStmt.Cols) == 0 {
+		return nil, 0, false, errors.New("invalid insert statement structure: no columns specified")
+	}
+
+	// Type assert the valuesList to *pg_query.Node_List
+	list, ok := valuesList.Node.(*pg_query.Node_List)
+	if !ok {
+		return nil, 0, false, errors.New("unsupported values list type")
+	}
+
+	// Ensure the number of values matches the number of columns
+	if len(list.List.Items) < len(insertStmt.Cols) {
+		return nil, 0, false, errors.New("values list has fewer items than columns")
+	}
+
+	// Iterate through columns to find the sharding key
+	for i, colItem := range insertStmt.Cols {
+		// Extract column name
+		resTarget, ok := colItem.Node.(*pg_query.Node_ResTarget)
+		if !ok {
+			continue // Skip if not a ResTarget
+		}
+		colName := resTarget.ResTarget.Name
+
+		// Check if this column is the sharding key
+		if colName == r.ShardingKey {
+			// Extract the corresponding value expression
+			expr := list.List.Items[i]
+			value, err = extractValueFromExpr(expr, args)
+			if err != nil {
+				return nil, 0, false, err
+			}
+			keyFound = true
+			break
+		}
+	}
+
+	if !keyFound {
+		return nil, 0, false, ErrMissingShardingKey
+	}
+
+	for i, colItem := range insertStmt.Cols {
+		resTarget, ok := colItem.Node.(*pg_query.Node_ResTarget)
+		if !ok {
+			continue
+		}
+		colName := resTarget.ResTarget.Name
+		if colName == "id" {
+			expr := list.List.Items[i]
+			idValue, err := extractValueFromExpr(expr, args)
+			if err != nil {
+				return nil, 0, false, err
+			}
+			id, ok = idValue.(int64)
+			if !ok {
+				return nil, 0, false, ErrInvalidID
+			}
+			break
+		}
+	}
+
+	return value, id, keyFound, nil
 }
 
 func collectTablesFromSelect(selectStmt *pg_query.SelectStmt) []string {
@@ -487,6 +601,7 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 	case *pg_query.Node_RangeVar:
 		if newName, ok := tableMap[n.RangeVar.Relname]; ok {
 			n.RangeVar.Relname = newName
+			n.RangeVar.Relpersistence = strconv.Itoa((`\"`)) // Indicate that the identifier should be quoted
 		}
 	case *pg_query.Node_SelectStmt:
 		// Recurse into FROM clause
@@ -507,10 +622,11 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 		replaceTableNames(n.ResTarget.Val, tableMap)
 	case *pg_query.Node_ColumnRef:
 		// Update table name in column references
-		if len(n.ColumnRef.Fields) == 2 {
-			if tableNameNode, ok := n.ColumnRef.Fields[0].Node.(*pg_query.Node_String_); ok {
-				if newName, ok := tableMap[tableNameNode.String_.Sval]; ok {
-					tableNameNode.String_.Sval = newName
+		if len(n.ColumnRef.Fields) >= 1 {
+			// Modify each field in the column reference
+			for _, field := range n.ColumnRef.Fields {
+				if stringNode, ok := field.Node.(*pg_query.Node_String_); ok {
+					stringNode.String_.Sval = fmt.Sprintf(`"%s"`, stringNode.String_.Sval)
 				}
 			}
 		}
@@ -537,10 +653,14 @@ func extractValueFromExpr(expr *pg_query.Node, args []interface{}) (interface{},
 		switch val := v.AConst.Val.(type) {
 		case *pg_query.A_Const_Ival:
 			return val.Ival, nil
-		case *pg_query.A_Const_Fval:
-			return val.Fval, nil
 		case *pg_query.A_Const_Sval:
 			return val.Sval, nil
+		case *pg_query.A_Const_Fval:
+			return val.Fval, nil
+		case *pg_query.A_Const_Bsval:
+			return val.Bsval, nil
+		case *pg_query.A_Const_Boolval:
+			return val.Boolval, nil
 		default:
 			return nil, fmt.Errorf("unsupported constant type")
 		}
@@ -557,8 +677,26 @@ func (s *Sharding) extractShardingKeyFromConditions(r Config, conditions []*pg_q
 		}
 	}
 	if !keyFound {
-		return nil, 0, false, ErrMissingShardingKey
+		// Try to extract 'id' if 'ShardingAlgorithmByPrimaryKey' is set
+		for _, condition := range conditions {
+			idFound, idValue, err := traverseConditionForKey("id", condition, args)
+			if idFound {
+				idInt64, ok := idValue.(int64)
+				if !ok {
+					err = ErrInvalidID
+					return nil, 0, false, err
+				}
+				id = idInt64
+				return nil, id, false, nil
+			}
+		}
+		// If 'id' is not found, and 'ShardingAlgorithmByPrimaryKey' is not set
+		if r.ShardingAlgorithmByPrimaryKey == nil {
+			err = ErrMissingShardingKey
+			return
+		}
 	}
+
 	return
 }
 
