@@ -7,8 +7,8 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v5"
 	"gorm.io/gorm"
 	"hash/crc32"
-	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -174,30 +174,43 @@ func (s *Sharding) compile() error {
 				c.tableFormat = "_%04d"
 			}
 			c.ShardingAlgorithm = func(value any) (suffix string, err error) {
-				var id int64
+				id := 0
 				switch v := value.(type) {
-				case int, int64, int32, int16, int8:
-					id = reflect.ValueOf(v).Int()
-				case uint, uint64, uint32, uint16, uint8:
-					id = int64(reflect.ValueOf(v).Uint())
-				case float32, float64:
-					val := func(f float64) int64 {
-						if f < 0 {
-							return int64(f - 0.5)
-						}
-						return int64(f + 0.5)
-					}
-
-					id = val(v.(float64)) // Truncate float to int64
+				case int:
+					id = v
+				case int64:
+					id = int(v)
+				case int32:
+					id = int(v)
+				case int16:
+					id = int(v)
+				case int8:
+					id = int(v)
+				case uint:
+					id = int(v)
+				case uint64:
+					id = int(v)
+				case uint32:
+					id = int(v)
+				case uint16:
+					id = int(v)
+				case uint8:
+					id = int(v)
+				case float64:
+					id = int(v)
+				case float32:
+					id = int(v)
 				case string:
-					id, err = strconv.ParseInt(v, 10, 64)
+					id, err = strconv.Atoi(v)
 					if err != nil {
-						id = int64(crc32.ChecksumIEEE([]byte(v)))
+						id = int(crc32.ChecksumIEEE([]byte(v)))
 					}
 				default:
-					return "", fmt.Errorf("default algorithm only supports integer and string types")
+					return "", fmt.Errorf("default algorithm only support integer and string column," +
+						"if you use other type, specify you own ShardingAlgorithm")
 				}
-				return fmt.Sprintf(c.tableFormat, id%int64(c.NumberOfShards)), nil
+
+				return fmt.Sprintf(c.tableFormat, id%int(c.NumberOfShards)), nil
 			}
 
 		}
@@ -298,6 +311,10 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 	// When DoubleWrite is enabled, we need to query database schema
 	// information by table name during the migration.
 	if _, ok := db.Get(ShardingIgnoreStoreKey); !ok {
+		// Check if the query is accessing system tables
+		if isSystemQuery(db.Statement.SQL.String()) {
+			return
+		}
 		s.mutex.Lock()
 		if db.Statement.ConnPool != nil {
 			s.ConnPool = &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s}
@@ -601,8 +618,21 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 	case *pg_query.Node_RangeVar:
 		if newName, ok := tableMap[n.RangeVar.Relname]; ok {
 			n.RangeVar.Relname = newName
-			n.RangeVar.Relpersistence = strconv.Itoa((`\"`)) // Indicate that the identifier should be quoted
+			//n.RangeVar.Relpersistence = strconv.Itoa((`\"`)) // Indicate that the identifier should be quoted
 		}
+	case *pg_query.Node_UpdateStmt:
+		if newName, ok := tableMap[n.UpdateStmt.Relation.Relname]; ok {
+			n.UpdateStmt.Relation.Relname = newName
+		}
+		replaceTableNames(n.UpdateStmt.WhereClause, tableMap)
+		for _, target := range n.UpdateStmt.TargetList {
+			replaceTableNames(target, tableMap)
+		}
+	case *pg_query.Node_DeleteStmt:
+		if newName, ok := tableMap[n.DeleteStmt.Relation.Relname]; ok {
+			n.DeleteStmt.Relation.Relname = newName
+		}
+		replaceTableNames(n.DeleteStmt.WhereClause, tableMap)
 	case *pg_query.Node_SelectStmt:
 		// Recurse into FROM clause
 		for _, item := range n.SelectStmt.FromClause {
@@ -621,15 +651,16 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 	case *pg_query.Node_ResTarget:
 		replaceTableNames(n.ResTarget.Val, tableMap)
 	case *pg_query.Node_ColumnRef:
+		// todo
 		// Update table name in column references
-		if len(n.ColumnRef.Fields) >= 1 {
-			// Modify each field in the column reference
-			for _, field := range n.ColumnRef.Fields {
-				if stringNode, ok := field.Node.(*pg_query.Node_String_); ok {
-					stringNode.String_.Sval = fmt.Sprintf(`"%s"`, stringNode.String_.Sval)
-				}
-			}
-		}
+		//if len(n.ColumnRef.Fields) >= 1 {
+		//	// Modify each field in the column reference
+		//	for _, field := range n.ColumnRef.Fields {
+		//		if stringNode, ok := field.Node.(*pg_query.Node_String_); ok {
+		//			stringNode.String_.Sval = fmt.Sprintf(`"%s"`, stringNode.String_.Sval)
+		//		}
+		//	}
+		//}
 	case *pg_query.Node_AExpr:
 		replaceTableNames(n.AExpr.Lexpr, tableMap)
 		replaceTableNames(n.AExpr.Rexpr, tableMap)
@@ -650,23 +681,43 @@ func extractValueFromExpr(expr *pg_query.Node, args []interface{}) (interface{},
 			return nil, fmt.Errorf("parameter index out of range")
 		}
 	case *pg_query.Node_AConst:
-		switch val := v.AConst.Val.(type) {
-		case *pg_query.A_Const_Ival:
-			return val.Ival, nil
-		case *pg_query.A_Const_Sval:
-			return val.Sval, nil
-		case *pg_query.A_Const_Fval:
-			return val.Fval, nil
-		case *pg_query.A_Const_Bsval:
-			return val.Bsval, nil
-		case *pg_query.A_Const_Boolval:
-			return val.Boolval, nil
-		default:
-			return nil, fmt.Errorf("unsupported constant type")
+		return extractValueFromAConst(v.AConst)
+	default:
+		return nil, fmt.Errorf("unsupported expression type: %T", expr.Node)
+	}
+}
+
+func extractValueFromAConst(aConst *pg_query.A_Const) (interface{}, error) {
+	switch val := aConst.Val.(type) {
+	case *pg_query.A_Const_Ival:
+		// Integer value
+		if val.Ival != nil {
+			return val.Ival.Ival, nil
+		}
+	case *pg_query.A_Const_Sval:
+		// String value
+		if val.Sval != nil {
+			return val.Sval.Sval, nil
+		}
+	case *pg_query.A_Const_Fval:
+		// Float value
+		if val.Fval != nil {
+			return strconv.ParseFloat(val.Fval.Fval, 64)
+		}
+	case *pg_query.A_Const_Boolval:
+		// Boolean value
+		if val.Boolval != nil {
+			return val.Boolval.Boolval, nil
+		}
+	case *pg_query.A_Const_Bsval:
+		// Bit string value
+		if val.Bsval != nil {
+			return val.Bsval.Bsval, nil
 		}
 	default:
-		return nil, fmt.Errorf("unsupported expression type")
+		return nil, fmt.Errorf("unsupported constant type: %T", val)
 	}
+	return nil, fmt.Errorf("value is nil in A_Const")
 }
 
 func (s *Sharding) extractShardingKeyFromConditions(r Config, conditions []*pg_query.Node, args ...interface{}) (value interface{}, id int64, keyFound bool, err error) {
@@ -676,6 +727,7 @@ func (s *Sharding) extractShardingKeyFromConditions(r Config, conditions []*pg_q
 			break
 		}
 	}
+
 	if !keyFound {
 		// Try to extract 'id' if 'ShardingAlgorithmByPrimaryKey' is set
 		for _, condition := range conditions {
@@ -693,11 +745,11 @@ func (s *Sharding) extractShardingKeyFromConditions(r Config, conditions []*pg_q
 		// If 'id' is not found, and 'ShardingAlgorithmByPrimaryKey' is not set
 		if r.ShardingAlgorithmByPrimaryKey == nil {
 			err = ErrMissingShardingKey
-			return
+			return nil, 0, false, err
 		}
 	}
 
-	return
+	return value, id, keyFound, err
 }
 
 func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []interface{}) (keyFound bool, value interface{}, err error) {
@@ -744,6 +796,7 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 
 func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err error) {
 	if keyFind {
+		fmt.Printf("Sharding key value type: %T\n", value)
 		suffix, err = r.ShardingAlgorithm(value)
 		if err != nil {
 			return
@@ -756,4 +809,18 @@ func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err 
 		suffix = r.ShardingAlgorithmByPrimaryKey(id)
 	}
 	return
+}
+
+func isSystemQuery(query string) bool {
+	systemTables := []string{
+		"information_schema",
+		"pg_catalog",
+		// todo: Add other system schemas if necessary
+	}
+	for _, sysTable := range systemTables {
+		if strings.Contains(query, sysTable) {
+			return true
+		}
+	}
+	return false
 }
