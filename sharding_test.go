@@ -34,7 +34,7 @@ type Category struct {
 func dbURL() string {
 	dbURL := os.Getenv("DB_URL")
 	if len(dbURL) == 0 {
-		dbURL = "postgres://localhost:5432/sharding-test?sslmode=disable"
+		dbURL = "postgres://psql:psql@localhost:6432/sharding-test?sslmode=disable"
 		if mysqlDialector() {
 			dbURL = "root@tcp(127.0.0.1:3306)/sharding-test?charset=utf8mb4"
 		}
@@ -45,7 +45,7 @@ func dbURL() string {
 func dbNoIDURL() string {
 	dbURL := os.Getenv("DB_NOID_URL")
 	if len(dbURL) == 0 {
-		dbURL = "postgres://localhost:5432/sharding-noid-test?sslmode=disable"
+		dbURL = "postgres://psql:psql@localhost:6432/sharding-noid-test?sslmode=disable"
 		if mysqlDialector() {
 			dbURL = "root@tcp(127.0.0.1:3306)/sharding-noid-test?charset=utf8mb4"
 		}
@@ -56,7 +56,7 @@ func dbNoIDURL() string {
 func dbReadURL() string {
 	dbURL := os.Getenv("DB_READ_URL")
 	if len(dbURL) == 0 {
-		dbURL = "postgres://localhost:5432/sharding-read-test?sslmode=disable"
+		dbURL = "postgres://psql:psql@localhost:6432/sharding-read-test?sslmode=disable"
 		if mysqlDialector() {
 			dbURL = "root@tcp(127.0.0.1:3306)/sharding-read-test?charset=utf8mb4"
 		}
@@ -67,7 +67,7 @@ func dbReadURL() string {
 func dbWriteURL() string {
 	dbURL := os.Getenv("DB_WRITE_URL")
 	if len(dbURL) == 0 {
-		dbURL = "postgres://localhost:5432/sharding-write-test?sslmode=disable"
+		dbURL = "postgres://psql:psql@localhost:6432/sharding-write-test?sslmode=disable"
 		if mysqlDialector() {
 			dbURL = "root@tcp(127.0.0.1:3306)/sharding-write-test?charset=utf8mb4"
 		}
