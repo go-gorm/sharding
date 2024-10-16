@@ -355,6 +355,9 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	switch stmtNode := stmt.Stmt.Node.(type) {
 	case *pg_query.Node_SelectStmt:
 		selectStmt := stmtNode.SelectStmt
+		if strings.Contains(query, "/* nosharding */") {
+			return ftQuery, stQuery, tableName, nil
+		}
 		tables = collectTablesFromSelect(selectStmt)
 		if selectStmt.WhereClause != nil {
 			conditions = append(conditions, selectStmt.WhereClause)
@@ -405,9 +408,24 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	// Process tables and conditions to update with sharded table names
 	tableMap := make(map[string]string) // originalTableName -> shardedTableName
 	for _, originalTableName := range tables {
-		r, ok := s.configs[originalTableName]
+		schemaName := ""
+		tableName = originalTableName
+
+		// Check for schema-qualified table names
+		if strings.Contains(originalTableName, ".") {
+			parts := strings.SplitN(originalTableName, ".", 2)
+			schemaName = parts[0]
+			tableName = parts[1]
+		}
+
+		fullTableName := tableName
+		if schemaName != "" {
+			fullTableName = fmt.Sprintf("%s.%s", schemaName, tableName)
+		}
+
+		r, ok := s.configs[fullTableName]
 		if !ok {
-			continue // Skip tables that are not sharded
+			continue // Skip tables not configured for sharding
 		}
 
 		var suffix string
@@ -416,27 +434,57 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			var consistentSuffix string
 			suffixes := make(map[string]bool)
 
-			// Iterate through each values list to extract suffixes
-			for _, valuesList := range insertStmt.SelectStmt.GetSelectStmt().ValuesLists {
-				value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
-				if err != nil {
-					return ftQuery, stQuery, tableName, err
+			if insertStmt.SelectStmt != nil {
+				selectStmt := insertStmt.SelectStmt.GetSelectStmt()
+				if selectStmt != nil && len(selectStmt.ValuesLists) > 0 {
+					// Iterate through each values list to extract suffixes
+					for _, valuesList := range selectStmt.ValuesLists {
+						value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
+						if err != nil {
+							return ftQuery, stQuery, tableName, err
+						}
+						//fmt.Println("value", value, "id", id, "keyFound", keyFound)
+						currentSuffix, err := getSuffix(value, id, keyFound, r)
+						if err != nil {
+							return ftQuery, stQuery, tableName, err
+						}
+
+						suffixes[currentSuffix] = true
+
+						// If more than one unique suffix is found, return an error
+						if len(suffixes) > 1 {
+							return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
+						}
+
+						// Capture the consistent suffix
+						consistentSuffix = currentSuffix
+					}
+				} else {
+					return ftQuery, stQuery, tableName, fmt.Errorf("insert statement select is not a ValuesLists")
 				}
+			} else if len(insertStmt.Cols) > 0 {
+				for _, valuesList := range insertStmt.Cols {
+					value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
+					if err != nil {
+						return ftQuery, stQuery, tableName, err
+					}
+					currentSuffix, err := getSuffix(value, id, keyFound, r)
+					if err != nil {
+						return ftQuery, stQuery, tableName, err
+					}
 
-				currentSuffix, err := getSuffix(value, id, keyFound, r)
-				if err != nil {
-					return ftQuery, stQuery, tableName, err
+					suffixes[currentSuffix] = true
+
+					// If more than one unique suffix is found, return an error
+					if len(suffixes) > 1 {
+						return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
+					}
+
+					// Capture the consistent suffix
+					//consistentSuffix = currentSuffix					//
 				}
-
-				suffixes[currentSuffix] = true
-
-				// If more than one unique suffix is found, return an error
-				if len(suffixes) > 1 {
-					return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
-				}
-
-				// Capture the consistent suffix
-				consistentSuffix = currentSuffix
+			} else {
+				return ftQuery, stQuery, tableName, fmt.Errorf("unsupported insert statement")
 			}
 
 			// Ensure all suffixes are consistent
@@ -565,24 +613,24 @@ func collectTablesFromSelect(selectStmt *pg_query.SelectStmt) []string {
 func collectTablesFromJoin(joinExpr *pg_query.JoinExpr) []string {
 	var tables []string
 	if joinExpr.Larg != nil {
-		switch larg := joinExpr.Larg.Node.(type) {
-		case *pg_query.Node_RangeVar:
-			tables = append(tables, larg.RangeVar.Relname)
-		case *pg_query.Node_JoinExpr:
-			tables = append(tables, collectTablesFromJoin(larg.JoinExpr)...)
-		}
+		tables = append(tables, collectTablesFromExpr(joinExpr.Larg)...)
 	}
 	if joinExpr.Rarg != nil {
-		switch rarg := joinExpr.Rarg.Node.(type) {
-		case *pg_query.Node_RangeVar:
-			tables = append(tables, rarg.RangeVar.Relname)
-		case *pg_query.Node_JoinExpr:
-			tables = append(tables, collectTablesFromJoin(rarg.JoinExpr)...)
-		}
+		tables = append(tables, collectTablesFromExpr(joinExpr.Rarg)...)
 	}
 	return tables
 }
 
+func collectTablesFromExpr(expr *pg_query.Node) []string {
+	switch n := expr.Node.(type) {
+	case *pg_query.Node_RangeVar:
+		return []string{n.RangeVar.Relname}
+	case *pg_query.Node_JoinExpr:
+		return collectTablesFromJoin(n.JoinExpr)
+	default:
+		return nil
+	}
+}
 func (s *Sharding) extractInsertShardingKey(r Config, insertStmt *pg_query.InsertStmt, args ...interface{}) (value interface{}, id int64, keyFound bool, err error) {
 	if len(insertStmt.Cols) == 0 || insertStmt.SelectStmt == nil || len(insertStmt.SelectStmt.GetSelectStmt().ValuesLists) == 0 {
 		return nil, 0, false, errors.New("invalid insert statement structure")
@@ -616,13 +664,23 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 
 	switch n := node.Node.(type) {
 	case *pg_query.Node_RangeVar:
-		if newName, ok := tableMap[n.RangeVar.Relname]; ok {
-			n.RangeVar.Relname = newName
-			//n.RangeVar.Relpersistence = strconv.Itoa((`\"`)) // Indicate that the identifier should be quoted
+		// Replace table names in RangeVar nodes
+		schemaName := n.RangeVar.Schemaname
+		tableName := n.RangeVar.Relname
+		fullTableName := tableName
+		if schemaName != "" {
+			fullTableName = fmt.Sprintf("%s.%s", schemaName, tableName)
 		}
+
+		if newName, ok := tableMap[fullTableName]; ok {
+			n.RangeVar.Relname = newName
+			n.RangeVar.Location = -1 // Force quoting if necessary
+		}
+
 	case *pg_query.Node_UpdateStmt:
 		if newName, ok := tableMap[n.UpdateStmt.Relation.Relname]; ok {
 			n.UpdateStmt.Relation.Relname = newName
+			n.UpdateStmt.Relation.Location = -1 // Force quoting
 		}
 		replaceTableNames(n.UpdateStmt.WhereClause, tableMap)
 		for _, target := range n.UpdateStmt.TargetList {
@@ -631,36 +689,39 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 	case *pg_query.Node_DeleteStmt:
 		if newName, ok := tableMap[n.DeleteStmt.Relation.Relname]; ok {
 			n.DeleteStmt.Relation.Relname = newName
+			n.DeleteStmt.Relation.Location = -1 // Force quoting
 		}
 		replaceTableNames(n.DeleteStmt.WhereClause, tableMap)
 	case *pg_query.Node_SelectStmt:
-		// Recurse into FROM clause
+		// Recursively process FROM clause and other relevant clauses
 		for _, item := range n.SelectStmt.FromClause {
 			replaceTableNames(item, tableMap)
 		}
-		// Recurse into target list (SELECT columns)
 		for _, target := range n.SelectStmt.TargetList {
 			replaceTableNames(target, tableMap)
 		}
-		// Recurse into WHERE clause
 		replaceTableNames(n.SelectStmt.WhereClause, tableMap)
 	case *pg_query.Node_JoinExpr:
+		// Recursively process left and right arguments
 		replaceTableNames(n.JoinExpr.Larg, tableMap)
 		replaceTableNames(n.JoinExpr.Rarg, tableMap)
 		replaceTableNames(n.JoinExpr.Quals, tableMap)
+
 	case *pg_query.Node_ResTarget:
+		// Process expressions in the SELECT list
 		replaceTableNames(n.ResTarget.Val, tableMap)
 	case *pg_query.Node_ColumnRef:
-		// todo
-		// Update table name in column references
-		//if len(n.ColumnRef.Fields) >= 1 {
-		//	// Modify each field in the column reference
-		//	for _, field := range n.ColumnRef.Fields {
-		//		if stringNode, ok := field.Node.(*pg_query.Node_String_); ok {
-		//			stringNode.String_.Sval = fmt.Sprintf(`"%s"`, stringNode.String_.Sval)
-		//		}
-		//	}
-		//}
+		fields := n.ColumnRef.Fields
+		if len(fields) >= 2 {
+			// Check if the first field is a table name
+			if stringNode, ok := fields[0].Node.(*pg_query.Node_String_); ok {
+				originalTableName := stringNode.String_.Sval
+				if newTableName, exists := tableMap[originalTableName]; exists {
+					// Replace the table name with the sharded name
+					stringNode.String_.Sval = newTableName
+				}
+			}
+		}
 	case *pg_query.Node_AExpr:
 		replaceTableNames(n.AExpr.Lexpr, tableMap)
 		replaceTableNames(n.AExpr.Rexpr, tableMap)
@@ -796,7 +857,6 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 
 func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err error) {
 	if keyFind {
-		fmt.Printf("Sharding key value type: %T\n", value)
 		suffix, err = r.ShardingAlgorithm(value)
 		if err != nil {
 			return
@@ -815,10 +875,17 @@ func isSystemQuery(query string) bool {
 	systemTables := []string{
 		"information_schema",
 		"pg_catalog",
+		"CREATE TABLE",
+		"CREATE INDEX",
+		"CREATE SEQUENCE",
+		"ALTER TABLE",
+		"DROP TABLE",
+		"DROP INDEX",
 		// todo: Add other system schemas if necessary
 	}
+	upperQuery := strings.ToUpper(strings.TrimSpace(query))
 	for _, sysTable := range systemTables {
-		if strings.Contains(query, sysTable) {
+		if strings.Contains(upperQuery, strings.ToUpper(sysTable)) {
 			return true
 		}
 	}
