@@ -435,39 +435,24 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			suffixes := make(map[string]bool)
 
 			if insertStmt.SelectStmt != nil {
-				selectStmt := insertStmt.SelectStmt.GetSelectStmt()
-				if selectStmt != nil && len(selectStmt.ValuesLists) > 0 {
-					// Iterate through each values list to extract suffixes
-					for _, valuesList := range selectStmt.ValuesLists {
-						value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
-						if err != nil {
-							return ftQuery, stQuery, tableName, err
-						}
-						//fmt.Println("value", value, "id", id, "keyFound", keyFound)
-						currentSuffix, err := getSuffix(value, id, keyFound, r)
-						if err != nil {
-							return ftQuery, stQuery, tableName, err
-						}
-
-						suffixes[currentSuffix] = true
-
-						// If more than one unique suffix is found, return an error
-						if len(suffixes) > 1 {
-							return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
-						}
-
-						// Capture the consistent suffix
-						consistentSuffix = currentSuffix
-					}
-				} else {
-					return ftQuery, stQuery, tableName, fmt.Errorf("insert statement select is not a ValuesLists")
+				selectStmtNode, ok := insertStmt.SelectStmt.Node.(*pg_query.Node_SelectStmt)
+				if !ok {
+					return ftQuery, stQuery, tableName, fmt.Errorf("unsupported insert statement: select_stmt is not a SelectStmt")
 				}
-			} else if len(insertStmt.Cols) > 0 {
-				for _, valuesList := range insertStmt.Cols {
+				selectStmt := selectStmtNode.SelectStmt
+				if len(selectStmt.ValuesLists) == 0 {
+					return ftQuery, stQuery, tableName, fmt.Errorf("insert statement select is not a VALUES list")
+				}
+
+				// Iterate through each values list to extract suffixes
+				for _, valuesList := range selectStmt.ValuesLists {
+					fmt.Println("selectStmt.valuesList", valuesList)
 					value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
 					if err != nil {
 						return ftQuery, stQuery, tableName, err
 					}
+					fmt.Printf("Extracted sharding key: %v, id: %d, keyFound: %v\n", value, id, keyFound)
+
 					currentSuffix, err := getSuffix(value, id, keyFound, r)
 					if err != nil {
 						return ftQuery, stQuery, tableName, err
@@ -481,10 +466,37 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 					}
 
 					// Capture the consistent suffix
-					//consistentSuffix = currentSuffix					//
+					consistentSuffix = currentSuffix
 				}
 			} else {
-				return ftQuery, stQuery, tableName, fmt.Errorf("unsupported insert statement")
+				if len(insertStmt.ReturningList) == 0 {
+					return ftQuery, stQuery, tableName, fmt.Errorf("insert statement has no VALUES list")
+				}
+
+				// Iterate through each values list to extract suffixes
+				for _, valuesList := range insertStmt.ReturningList {
+					fmt.Println("valuesList", valuesList)
+					value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
+					if err != nil {
+						return ftQuery, stQuery, tableName, err
+					}
+					fmt.Printf("Extracted sharding key: %v, id: %d, keyFound: %v\n", value, id, keyFound)
+
+					currentSuffix, err := getSuffix(value, id, keyFound, r)
+					if err != nil {
+						return ftQuery, stQuery, tableName, err
+					}
+
+					suffixes[currentSuffix] = true
+
+					// If more than one unique suffix is found, return an error
+					if len(suffixes) > 1 {
+						return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
+					}
+
+					// Capture the consistent suffix
+					consistentSuffix = currentSuffix
+				}
 			}
 
 			// Ensure all suffixes are consistent
@@ -538,60 +550,61 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 	}
 
 	// Type assert the valuesList to *pg_query.Node_List
-	list, ok := valuesList.Node.(*pg_query.Node_List)
+	listNode, ok := valuesList.Node.(*pg_query.Node_List)
 	if !ok {
 		return nil, 0, false, errors.New("unsupported values list type")
 	}
+	list := listNode.List
 
 	// Ensure the number of values matches the number of columns
-	if len(list.List.Items) < len(insertStmt.Cols) {
+	if len(list.Items) != len(insertStmt.Cols) {
 		return nil, 0, false, errors.New("values list has fewer items than columns")
 	}
 
-	// Iterate through columns to find the sharding key
+	// Iterate through columns to find the sharding key and id
 	for i, colItem := range insertStmt.Cols {
-		// Extract column name
 		resTarget, ok := colItem.Node.(*pg_query.Node_ResTarget)
 		if !ok {
 			continue // Skip if not a ResTarget
 		}
 		colName := resTarget.ResTarget.Name
+		resTarget.ResTarget.Location = -1 // Force quotingz
 
-		// Check if this column is the sharding key
+		expr := list.Items[i]
+		exprValue, err := extractValueFromExpr(expr, args)
+		if err != nil {
+			return nil, 0, false, err
+		}
+
 		if colName == r.ShardingKey {
-			// Extract the corresponding value expression
-			expr := list.List.Items[i]
-			value, err = extractValueFromExpr(expr, args)
-			if err != nil {
-				return nil, 0, false, err
-			}
+			value = exprValue
 			keyFound = true
-			break
+			fmt.Printf("Sharding key found: %s = %v\n", colName, value)
+		}
+		if colName == "id" {
+			fmt.Printf("ID found: %s = %v\n", colName, id)
+			switch v := exprValue.(type) {
+			case int64:
+				id = v
+			case int32:
+				id = int64(v)
+			case int:
+				id = int64(v)
+			case string:
+				idInt64, err := strconv.ParseInt(v, 10, 64)
+				if err != nil {
+					return nil, 0, false, ErrInvalidID
+				}
+				id = idInt64
+			default:
+				return nil, 0, false, ErrInvalidID
+			}
+			fmt.Printf("ID found: %s = %v\n", colName, id)
 		}
 	}
 
 	if !keyFound {
 		return nil, 0, false, ErrMissingShardingKey
-	}
-
-	for i, colItem := range insertStmt.Cols {
-		resTarget, ok := colItem.Node.(*pg_query.Node_ResTarget)
-		if !ok {
-			continue
-		}
-		colName := resTarget.ResTarget.Name
-		if colName == "id" {
-			expr := list.List.Items[i]
-			idValue, err := extractValueFromExpr(expr, args)
-			if err != nil {
-				return nil, 0, false, err
-			}
-			id, ok = idValue.(int64)
-			if !ok {
-				return nil, 0, false, ErrInvalidID
-			}
-			break
-		}
 	}
 
 	return value, id, keyFound, nil
@@ -631,31 +644,6 @@ func collectTablesFromExpr(expr *pg_query.Node) []string {
 		return nil
 	}
 }
-func (s *Sharding) extractInsertShardingKey(r Config, insertStmt *pg_query.InsertStmt, args ...interface{}) (value interface{}, id int64, keyFound bool, err error) {
-	if len(insertStmt.Cols) == 0 || insertStmt.SelectStmt == nil || len(insertStmt.SelectStmt.GetSelectStmt().ValuesLists) == 0 {
-		return nil, 0, false, errors.New("invalid insert statement structure")
-	}
-
-	colNames := insertStmt.Cols
-	valuesList := insertStmt.SelectStmt.GetSelectStmt().ValuesLists[0]
-
-	for i, colItem := range colNames {
-		colName := colItem.Node.(*pg_query.Node_ResTarget).ResTarget.Name
-		if colName == r.ShardingKey {
-			expr := valuesList.Node.(*pg_query.Node_List).List.Items[i]
-			value, err = extractValueFromExpr(expr, args)
-			if err != nil {
-				return nil, 0, false, err
-			}
-			keyFound = true
-			break
-		}
-	}
-	if !keyFound {
-		return nil, 0, false, ErrMissingShardingKey
-	}
-	return
-}
 
 func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 	if node == nil {
@@ -665,16 +653,9 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 	switch n := node.Node.(type) {
 	case *pg_query.Node_RangeVar:
 		// Replace table names in RangeVar nodes
-		schemaName := n.RangeVar.Schemaname
-		tableName := n.RangeVar.Relname
-		fullTableName := tableName
-		if schemaName != "" {
-			fullTableName = fmt.Sprintf("%s.%s", schemaName, tableName)
-		}
-
-		if newName, ok := tableMap[fullTableName]; ok {
-			n.RangeVar.Relname = newName
-			n.RangeVar.Location = -1 // Force quoting if necessary
+		if shardedName, exists := tableMap[n.RangeVar.Relname]; exists {
+			n.RangeVar.Relname = shardedName
+			n.RangeVar.Location = -1 // Force quoting
 		}
 
 	case *pg_query.Node_UpdateStmt:
@@ -701,15 +682,23 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 			replaceTableNames(target, tableMap)
 		}
 		replaceTableNames(n.SelectStmt.WhereClause, tableMap)
+		//  ORDER BY clause
+		for _, sortBy := range n.SelectStmt.SortClause {
+			replaceTableNames(sortBy, tableMap)
+		}
 	case *pg_query.Node_JoinExpr:
 		// Recursively process left and right arguments
 		replaceTableNames(n.JoinExpr.Larg, tableMap)
 		replaceTableNames(n.JoinExpr.Rarg, tableMap)
 		replaceTableNames(n.JoinExpr.Quals, tableMap)
-
+	case *pg_query.Node_SortBy:
+		replaceTableNames(n.SortBy.Node, tableMap)
 	case *pg_query.Node_ResTarget:
 		// Process expressions in the SELECT list
 		replaceTableNames(n.ResTarget.Val, tableMap)
+		if n.ResTarget.Name != "" {
+			n.ResTarget.Location = -1 // Force quoting of column aliases
+		}
 	case *pg_query.Node_ColumnRef:
 		fields := n.ColumnRef.Fields
 		if len(fields) >= 2 {
@@ -736,8 +725,9 @@ func extractValueFromExpr(expr *pg_query.Node, args []interface{}) (interface{},
 	switch v := expr.Node.(type) {
 	case *pg_query.Node_ParamRef:
 		// Positional parameter; PostgreSQL parameters are 1-based
-		if v.ParamRef.Number > 0 && int(v.ParamRef.Number) <= len(args) {
-			return args[v.ParamRef.Number-1], nil
+		index := int(v.ParamRef.Number) - 1
+		if index >= 0 && index < len(args) {
+			return args[index], nil
 		} else {
 			return nil, fmt.Errorf("parameter index out of range")
 		}
@@ -747,7 +737,6 @@ func extractValueFromExpr(expr *pg_query.Node, args []interface{}) (interface{},
 		return nil, fmt.Errorf("unsupported expression type: %T", expr.Node)
 	}
 }
-
 func extractValueFromAConst(aConst *pg_query.A_Const) (interface{}, error) {
 	switch val := aConst.Val.(type) {
 	case *pg_query.A_Const_Ival:
@@ -840,6 +829,7 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 					if err != nil {
 						return false, nil, err
 					}
+					fmt.Printf("Sharding key found in condition: %s = %v\n", columnName, value)
 					return true, value, nil
 				}
 			}
@@ -851,7 +841,19 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 				return keyFound, value, err
 			}
 		}
+	case *pg_query.Node_SelectStmt:
+		for _, arg := range n.SelectStmt.FromClause {
+			keyFound, value, err = traverseConditionForKey(shardingKey, arg, args)
+			if keyFound || err != nil {
+				return keyFound, value, err
+			}
+		}
+		keyFound, value, err = traverseConditionForKey(shardingKey, n.SelectStmt.WhereClause, args)
+		if keyFound || err != nil {
+			return keyFound, value, err
+		}
 	}
+
 	return false, nil, nil
 }
 

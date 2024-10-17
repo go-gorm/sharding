@@ -574,14 +574,14 @@ func TestJoinShardedWithNonShardedTable(t *testing.T) {
 
 	// Perform the query
 	err := db.Model(&Order{}).
-		Select("orders.*, categories.name as category_name").
+		Select("orders.*, categories.name AS category_name").
 		Joins("LEFT JOIN categories ON categories.id = orders.category_id").
 		Where("orders.user_id = ?", 100).
 		Scan(&result).Error
 
 	assert.NoError(t, err)
 
-	expected := `SELECT "orders_0".*, categories.name as category_name FROM "orders_0" LEFT JOIN categories ON categories.id = "orders_0".category_id WHERE "orders_0"."user_id" = $1`
+	expected := `SELECT "orders_0".*, categories.name AS category_name FROM "orders_0" LEFT JOIN categories ON categories.id = "orders_0".category_id WHERE "orders_0"."user_id" = $1`
 	actual := middleware.LastQuery()
 
 	assert.Equal(t, expected, actual)
@@ -609,13 +609,13 @@ func TestJoinTwoShardedTables(t *testing.T) {
 	}
 
 	tx := db.Model(&Order{}).
-		Select("orders.*, order_details.product as order_detail_product, order_details.quantity as order_detail_quantity").
-		Joins("INNER JOIN order_details ON order_details.order_id = orders.id").
+		Select("orders.*, order_details.product AS order_detail_product, order_details.quantity AS order_detail_quantity").
+		Joins("JOIN order_details ON order_details.order_id = orders.id").
 		Where("orders.user_id = ?", 100).
 		Scan(&results)
 
 	// Expected query
-	expectedQuery := `SELECT orders_0.*, order_details_1.product as order_detail_product, order_details_1.quantity as order_detail_quantity FROM orders_0 INNER JOIN order_details_1 ON order_details_1.order_id = orders_0.id WHERE orders_0.user_id = $1`
+	expectedQuery := `SELECT orders_0.*, order_details_1.product AS order_detail_product, order_details_1.quantity AS order_detail_quantity FROM orders_0 JOIN order_details_1 ON order_details_1.order_id = orders_0.id WHERE orders_0.user_id = $1`
 
 	// Assert query
 	assertQueryResult(t, expectedQuery, tx)
@@ -635,7 +635,7 @@ func TestSelfJoinShardedTable(t *testing.T) {
 	// Prepare data
 	order1 := Order{ID: 1, UserID: 100, Product: "iPhone"}
 	db.Create(&order1)
-	order2 := Order{ID: 2, UserID: 100, Product: "iPad"}
+	order2 := Order{UserID: 100, Product: "iPad"}
 	db.Create(&order2)
 
 	// Self-join on the sharded Order table
@@ -646,12 +646,12 @@ func TestSelfJoinShardedTable(t *testing.T) {
 
 	tx := db.Table("orders AS o1").
 		Select("o1.*, o2.product AS other_product").
-		Joins("INNER JOIN orders AS o2 ON o1.user_id = o2.user_id AND o1.id <> o2.id").
+		Joins("LEFT JOIN orders AS o2 ON o1.user_id = o2.user_id AND o1.id <> o2.id").
 		Where("o1.user_id = ?", 100).
 		Scan(&results)
 
 	// Expected query
-	expectedQuery := `SELECT o1.*, o2.product AS other_product FROM orders_0 o1 INNER JOIN orders_0 o2 ON o1.user_id = o2.user_id AND o1.id <> o2.id WHERE o1.user_id = $1`
+	expectedQuery := `SELECT o1.*, o2.product AS other_product FROM orders_0 o1 LEFT JOIN orders_0 o2 ON o1.user_id = o2.user_id AND o1.id <> o2.id WHERE o1.user_id = $1`
 
 	// Assert query
 	assertQueryResult(t, expectedQuery, tx)
@@ -683,8 +683,8 @@ func TestJoinShardedTablesDifferentKeys(t *testing.T) {
 	}
 
 	tx := db.Model(&Order{}).
-		Select("orders.*, order_details.product as order_detail_product, order_details.quantity as order_detail_quantity").
-		Joins("INNER JOIN order_details ON order_details.order_id = orders.id").
+		Select("orders.*, order_details.product AS order_detail_product, order_details.quantity AS order_detail_quantity").
+		Joins("RIGHT JOIN order_details ON order_details.order_id = orders.id").
 		Where("orders.user_id = ?", 100).
 		Scan(&results)
 
@@ -696,7 +696,7 @@ func TestJoinShardedTablesDifferentKeys(t *testing.T) {
 	orderDetailTableSuffix := fmt.Sprintf("_%01d", orderDetailShardIndex)
 
 	// Expected query with sharded table names
-	expectedQuery := fmt.Sprintf(`SELECT orders%s.*, order_details%s.product as order_detail_product, order_details%s.quantity as order_detail_quantity FROM orders%s INNER JOIN order_details%s ON order_details%s.order_id = orders%s.id WHERE orders%s.user_id = $1`,
+	expectedQuery := fmt.Sprintf(`SELECT orders%s.*, order_details%s.product AS order_detail_product, order_details%s.quantity AS order_detail_quantity FROM orders%s RIGHT JOIN order_details%s ON order_details%s.order_id = orders%s.id WHERE orders%s.user_id = $1`,
 		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix,
 		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix, orderTableSuffix, orderTableSuffix)
 
