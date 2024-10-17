@@ -469,7 +469,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 					consistentSuffix = currentSuffix
 				}
 			} else {
-				if len(insertStmt.ReturningList) == 0 {
+				if len(insertStmt.GetReturningList()) == 0 {
 					return ftQuery, stQuery, tableName, fmt.Errorf("insert statement has no VALUES list")
 				}
 
@@ -565,11 +565,17 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 	for i, colItem := range insertStmt.Cols {
 		resTarget, ok := colItem.Node.(*pg_query.Node_ResTarget)
 		if !ok {
-			continue // Skip if not a ResTarget
+			// Try accessing ResTarget directly
+			resTargetDirect := colItem.GetResTarget()
+			if resTargetDirect == nil {
+				continue // Skip if not a ResTarget
+			}
+			resTarget = &pg_query.Node_ResTarget{ResTarget: resTargetDirect}
 		}
-		colName := resTarget.ResTarget.Name
-		resTarget.ResTarget.Location = -1 // Force quotingz
 
+		colName := resTarget.ResTarget.Name
+
+		// Existing logic to extract values
 		expr := list.Items[i]
 		exprValue, err := extractValueFromExpr(expr, args)
 		if err != nil {
@@ -582,7 +588,6 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 			fmt.Printf("Sharding key found: %s = %v\n", colName, value)
 		}
 		if colName == "id" {
-			fmt.Printf("ID found: %s = %v\n", colName, id)
 			switch v := exprValue.(type) {
 			case int64:
 				id = v
@@ -603,7 +608,7 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 		}
 	}
 
-	if !keyFound {
+	if !keyFound && id == 0 {
 		return nil, 0, false, ErrMissingShardingKey
 	}
 
@@ -771,6 +776,10 @@ func extractValueFromAConst(aConst *pg_query.A_Const) (interface{}, error) {
 }
 
 func (s *Sharding) extractShardingKeyFromConditions(r Config, conditions []*pg_query.Node, args ...interface{}) (value interface{}, id int64, keyFound bool, err error) {
+	var idFound bool
+	var idValue interface{}
+
+	// Attempt to find the sharding key
 	for _, condition := range conditions {
 		keyFound, value, err = traverseConditionForKey(r.ShardingKey, condition, args)
 		if keyFound || err != nil {
@@ -778,22 +787,23 @@ func (s *Sharding) extractShardingKeyFromConditions(r Config, conditions []*pg_q
 		}
 	}
 
+	// If sharding key is not found, attempt to find 'id'
 	if !keyFound {
-		// Try to extract 'id' if 'ShardingAlgorithmByPrimaryKey' is set
 		for _, condition := range conditions {
-			idFound, idValue, err := traverseConditionForKey("id", condition, args)
-			if idFound {
-				idInt64, ok := idValue.(int64)
-				if !ok {
-					err = ErrInvalidID
-					return nil, 0, false, err
-				}
-				id = idInt64
-				return nil, id, false, nil
+			idFound, idValue, err = traverseConditionForKey("id", condition, args)
+			if idFound || err != nil {
+				break
 			}
 		}
-		// If 'id' is not found, and 'ShardingAlgorithmByPrimaryKey' is not set
-		if r.ShardingAlgorithmByPrimaryKey == nil {
+		if idFound {
+			idInt64, ok := idValue.(int64)
+			if !ok {
+				err = ErrInvalidID
+				return nil, 0, false, err
+			}
+			id = idInt64
+		} else {
+			// Neither sharding key nor 'id' found; return error
 			err = ErrMissingShardingKey
 			return nil, 0, false, err
 		}
