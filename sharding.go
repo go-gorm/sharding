@@ -550,7 +550,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 				log.Printf("Updated table name to '%s'\n", shardedTableName)
 
 				// Now handle ID generation with args
-				err := s.assignIDToInsert(insertStmt, r, args...)
+				err := s.assignIDToInsert(insertStmt, r, &args)
 				if err != nil {
 					return ftQuery, stQuery, tableName, err
 				}
@@ -638,17 +638,19 @@ func collectConditionsFromSelect(selectStmt *pg_query.SelectStmt) []*pg_query.No
 }
 
 // assignIDToInsert generates a new ID and assigns it to the insert statement's VALUES list
-func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, args ...interface{}) error {
+func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, args *[]interface{}) error {
 	// Check if 'id' is already present in the columns (case-insensitive)
 	hasID := false
 	idIndex := -1
 	for i, colItem := range insertStmt.Cols {
 		resTarget, ok := colItem.Node.(*pg_query.Node_ResTarget)
-		if ok && strings.ToLower(resTarget.ResTarget.Name) == "id" {
-			hasID = true
-			idIndex = i
-			log.Printf("Detected 'id' column at index %d\n", i)
-			break
+		if ok {
+			resTarget.ResTarget.Location = -1 // Force quoting of column names
+			if strings.ToLower(resTarget.ResTarget.Name) == "id" {
+				hasID = true
+				idIndex = i
+				break
+			}
 		}
 	}
 
@@ -670,6 +672,9 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 			return fmt.Errorf("insert statement has no VALUES list")
 		}
 
+		// Find current max parameter number
+		maxParamNumber := getMaxParamNumber(&pg_query.Node{Node: &pg_query.Node_InsertStmt{InsertStmt: insertStmt}})
+
 		// Iterate through each VALUES list to check and assign 'id' if necessary
 		for idx, valuesList := range valuesSelect.ValuesLists {
 			listNode, ok := valuesList.Node.(*pg_query.Node_List)
@@ -684,7 +689,7 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 
 			// Extract the current 'id' value
 			expr := listNode.List.Items[idIndex]
-			exprValue, err := extractValueFromExpr(expr, args)
+			exprValue, err := extractValueFromExpr(expr, *args)
 			if err != nil {
 				return err
 			}
@@ -702,17 +707,22 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 				generatedID := r.PrimaryKeyGeneratorFn(int64(idx))
 				log.Printf("Generated new 'id' for VALUES list %d: %d\n", idx, generatedID)
 
-				// Assign the generated ID to the 'id' position in the VALUES list
+				// Increment parameter index
+				maxParamNumber++
+
+				// Append the generated ID to args
+				*args = append(*args, generatedID)
+
+				// Assign a ParamRef node with number = maxParamNumber
 				listNode.List.Items[idIndex] = &pg_query.Node{
-					Node: &pg_query.Node_AConst{
-						AConst: &pg_query.A_Const{
-							Val: &pg_query.A_Const_Ival{
-								Ival: &pg_query.Integer{Ival: int32(generatedID)},
-							},
+					Node: &pg_query.Node_ParamRef{
+						ParamRef: &pg_query.ParamRef{
+							Number: int32(maxParamNumber),
 						},
 					},
 				}
-				log.Printf("Assigned generated 'id' to VALUES list %d\n", idx)
+
+				log.Printf("Assigned generated 'id' to VALUES list %d as ParamRef number %d\n", idx, maxParamNumber)
 			} else {
 				log.Printf("'id' is already set to %d in VALUES list %d; no action taken.\n", idInt64, idx)
 			}
@@ -731,8 +741,8 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 		insertStmt.Cols = append(insertStmt.Cols, &pg_query.Node{
 			Node: &pg_query.Node_ResTarget{
 				ResTarget: &pg_query.ResTarget{
-					Name: "id",
-					Val:  &pg_query.Node{}, // Placeholder; will be assigned a value
+					Name:     "id",
+					Location: -1, // Force quoting
 				},
 			},
 		})
@@ -753,27 +763,84 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 			return fmt.Errorf("insert statement has no VALUES list")
 		}
 
+		// Find current max parameter number
+		maxParamNumber := getMaxParamNumber(&pg_query.Node{Node: &pg_query.Node_InsertStmt{InsertStmt: insertStmt}})
+
 		// Iterate through each VALUES list to append the generated 'id'
-		for _, valuesList := range valuesSelect.ValuesLists {
+		for idx, valuesList := range valuesSelect.ValuesLists {
 			listNode, ok := valuesList.Node.(*pg_query.Node_List)
 			if !ok {
 				return fmt.Errorf("unsupported values list type when assigning id")
 			}
 
-			// Append the generated ID to the list
+			// Generate a new ID
+			generatedID := r.PrimaryKeyGeneratorFn(int64(idx))
+			log.Printf("Generated new 'id' for VALUES list %d: %d\n", idx, generatedID)
+
+			// Increment parameter index
+			maxParamNumber++
+
+			// Append the generated ID to args
+			*args = append(*args, generatedID)
+
+			// Assign a ParamRef node with number = maxParamNumber
 			listNode.List.Items = append(listNode.List.Items, &pg_query.Node{
-				Node: &pg_query.Node_AConst{
-					AConst: &pg_query.A_Const{
-						Val: &pg_query.A_Const_Ival{
-							Ival: &pg_query.Integer{Ival: int32(generatedID)},
-						},
+				Node: &pg_query.Node_ParamRef{
+					ParamRef: &pg_query.ParamRef{
+						Number: int32(maxParamNumber),
 					},
 				},
 			})
+
+			log.Printf("Appended 'id' value to VALUES list %d as ParamRef number %d\n", idx, maxParamNumber)
 		}
 	}
 
 	return nil
+}
+
+func getMaxParamNumber(node *pg_query.Node) int {
+	maxParamNumber := 0
+	var traverse func(n *pg_query.Node)
+	traverse = func(n *pg_query.Node) {
+		if n == nil {
+			return
+		}
+		switch v := n.Node.(type) {
+		case *pg_query.Node_ParamRef:
+			if int(v.ParamRef.Number) > maxParamNumber {
+				maxParamNumber = int(v.ParamRef.Number)
+			}
+		default:
+			// Use reflection to traverse all fields recursively
+			val := reflect.ValueOf(v)
+			if val.Kind() == reflect.Ptr && !val.IsNil() {
+				val = val.Elem()
+			}
+			if val.Kind() != reflect.Struct {
+				return
+			}
+			for i := 0; i < val.NumField(); i++ {
+				field := val.Field(i)
+				if !field.IsValid() {
+					continue
+				}
+				if field.Kind() == reflect.Ptr {
+					if nodeField, ok := field.Interface().(*pg_query.Node); ok {
+						traverse(nodeField)
+					}
+				} else if field.Kind() == reflect.Slice {
+					for j := 0; j < field.Len(); j++ {
+						if nodeField, ok := field.Index(j).Interface().(*pg_query.Node); ok {
+							traverse(nodeField)
+						}
+					}
+				}
+			}
+		}
+	}
+	traverse(node)
+	return maxParamNumber
 }
 
 func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_query.InsertStmt, valuesList *pg_query.Node, args ...interface{}) (value interface{}, id int64, keyFound bool, err error) {
@@ -952,6 +1019,7 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 		}
 	case *pg_query.Node_ColumnRef:
 		fields := n.ColumnRef.Fields
+		n.ColumnRef.Location = -1 // Force quoting of column names
 		if len(fields) >= 2 {
 			// Check if the first field is a table name
 			if stringNode, ok := fields[0].Node.(*pg_query.Node_String_); ok {
@@ -1044,12 +1112,13 @@ func extractValueFromExpr(expr *pg_query.Node, args []interface{}) (interface{},
 		return nil, fmt.Errorf("unsupported expression type: %T", expr.Node)
 	}
 }
+
 func extractValueFromAConst(aConst *pg_query.A_Const) (interface{}, error) {
 	switch val := aConst.Val.(type) {
 	case *pg_query.A_Const_Ival:
 		// Integer value
 		if val.Ival != nil {
-			return val.Ival.Ival, nil
+			return int64(val.Ival.Ival), nil
 		}
 	case *pg_query.A_Const_Sval:
 		// String value
@@ -1059,7 +1128,11 @@ func extractValueFromAConst(aConst *pg_query.A_Const) (interface{}, error) {
 	case *pg_query.A_Const_Fval:
 		// Float value
 		if val.Fval != nil {
-			return strconv.ParseFloat(val.Fval.Fval, 64)
+			f, err := strconv.ParseFloat(val.Fval.Fval, 64)
+			if err != nil {
+				return nil, err
+			}
+			return f, nil
 		}
 	case *pg_query.A_Const_Boolval:
 		// Boolean value

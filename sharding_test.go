@@ -353,6 +353,7 @@ func TestInsertManyWithFillID(t *testing.T) {
 
 	expected := `INSERT INTO orders_0 ("user_id", "product", "category_id", id) VALUES ($1, $2, $3, $sfid), ($4, $5, $6, $sfid) RETURNING "id"`
 	lastQuery := middleware.LastQuery()
+	fmt.Println("lastQuery", lastQuery)
 	assertSfidQueryResult(t, toDialect(expected), lastQuery)
 }
 
@@ -614,7 +615,7 @@ func TestDataRace(t *testing.T) {
 
 func TestJoinTwoShardedTables(t *testing.T) {
 	// Clean up tables before test
-
+	truncateTables(db, "orders", "orders_0", "orders_1", "orders_2", "orders_3", "order_details", "order_details_0", "order_details_1", "order_details_2", "order_details_3")
 	// Prepare data without hardcoded IDs
 	order := Order{UserID: 100, Product: "iPhone"}
 	db.Create(&order)
