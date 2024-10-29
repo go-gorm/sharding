@@ -296,12 +296,12 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 		s.mutex.Unlock()
 	}
 }
-func replaceConditionTableName(key, tableName string, expr sqlparser.Expr) error {
+func replaceConditionTableName(oldTableName, tableName string, expr sqlparser.Expr) error {
 
 	err := sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
 		if n, ok := node.(*sqlparser.BinaryExpr); ok {
 			if q, ok2 := n.X.(*sqlparser.QualifiedRef); ok2 {
-				if q.Column.Name == key {
+				if q.Table.Name == oldTableName {
 					n.X.(*sqlparser.QualifiedRef).Table.Name = tableName
 				}
 			}
@@ -309,6 +309,22 @@ func replaceConditionTableName(key, tableName string, expr sqlparser.Expr) error
 		return nil
 	}), expr)
 	return err
+}
+func replaceSelectFieldTableName(oldTableName, tableName string, columns *sqlparser.OutputNames) *sqlparser.OutputNames {
+	rcs := []*sqlparser.ResultColumn(*columns)
+	for i := 0; i < len(rcs); i++ {
+		rc := rcs[i]
+		if n, ok := rc.Expr.(*sqlparser.BinaryExpr); ok {
+			if q, ok2 := n.X.(*sqlparser.QualifiedRef); ok2 {
+				if q.Table.Name == oldTableName {
+					n.X.(*sqlparser.QualifiedRef).Table.Name = tableName
+				}
+			}
+		}
+
+	}
+	r := sqlparser.OutputNames(rcs)
+	return &r
 }
 
 // resolve split the old query to full table query and sharding table query
@@ -454,20 +470,20 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 			ftQuery = stmt.String()
 			stmt.FromItems = newTable
 			stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
-			replaceConditionTableName(r.ShardingKey, newTable.Name.Name, stmt.Condition)
+			replaceConditionTableName(tableName, newTable.Name.Name, stmt.Condition)
+			stmt.Columns = replaceSelectFieldTableName(tableName, newTable.Name.Name, stmt.Columns)
 			stQuery = stmt.String()
 		case *sqlparser.UpdateStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
-			replaceConditionTableName(r.ShardingKey, newTable.Name.Name, stmt.Condition)
+			replaceConditionTableName(tableName, newTable.Name.Name, stmt.Condition)
 			stQuery = stmt.String()
 		case *sqlparser.DeleteStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
-			replaceConditionTableName(r.ShardingKey, newTable.Name.Name, stmt.Condition)
+			replaceConditionTableName(tableName, newTable.Name.Name, stmt.Condition)
 			stQuery = stmt.String()
 		}
-		slog.Debug(stQuery)
 	}
 
 	return
