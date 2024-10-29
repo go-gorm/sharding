@@ -3,6 +3,8 @@ package sharding
 import (
 	"context"
 	"fmt"
+	tassert "github.com/stretchr/testify/assert"
+	"gorm.io/gorm/logger"
 	"os"
 	"regexp"
 	"sort"
@@ -13,7 +15,6 @@ import (
 
 	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/assert"
-	tassert "github.com/stretchr/testify/assert"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -29,6 +30,11 @@ type Order struct {
 }
 
 type Category struct {
+	ID   int64 `gorm:"primarykey"`
+	Name string
+}
+
+type User struct {
 	ID   int64 `gorm:"primarykey"`
 	Name string
 }
@@ -103,9 +109,9 @@ var (
 	}
 	db, dbNoID, dbRead, dbWrite *gorm.DB
 
-	shardingConfig, shardingConfigNoID Config
-	middleware, middlewareNoID         *Sharding
-	node, _                            = snowflake.NewNode(1)
+	shardingConfig, shardingConfigOrderDetails, shardingConfigNoID, shardingConfigUser Config
+	middleware, middlewareNoID                                                         *Sharding
+	node, _                                                                            = snowflake.NewNode(1)
 )
 
 func init() {
@@ -125,6 +131,7 @@ func init() {
 	} else {
 		db, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
+			Logger:                                   logger.Default.LogMode(logger.Info),
 		})
 		dbNoID, _ = gorm.Open(postgres.New(dbNoIDConfig), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
@@ -154,19 +161,39 @@ func init() {
 		},
 	}
 
-	middleware = Register(shardingConfig, &Order{}, &OrderDetail{})
+	shardingConfigOrderDetails = Config{
+		DoubleWrite:         true,
+		ShardingKey:         "order_id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKSnowflake,
+	}
+	shardingConfigUser = Config{
+		DoubleWrite:         true,
+		ShardingKey:         "id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKSnowflake,
+	}
+
+	configs := map[string]Config{
+		"orders":        shardingConfig,
+		"order_details": shardingConfigOrderDetails,
+		"users":         shardingConfigUser,
+	}
+
+	middleware = Register(configs, &Order{}, &OrderDetail{}, &User{})
 	middlewareNoID = Register(shardingConfigNoID, &Order{}, &OrderDetail{})
 
 	fmt.Println("Clean only tables ...")
 	dropTables()
 	fmt.Println("AutoMigrate tables ...")
-	err := db.AutoMigrate(&Order{}, &Category{}, &OrderDetail{})
+	err := db.AutoMigrate(&Order{}, &Category{}, &OrderDetail{}, &User{})
 	if err != nil {
 		panic(err)
 	}
 	stables := []string{
 		"orders_0", "orders_1", "orders_2", "orders_3",
 		"order_details_0", "order_details_1", "order_details_2", "order_details_3",
+		"users_0", "users_1", "users_2", "users_3",
 	}
 
 	for _, table := range stables {
@@ -174,6 +201,8 @@ func init() {
 			createOrdersTable(table)
 		} else if strings.HasPrefix(table, "order_details") {
 			createOrderDetailsTable(table)
+		} else if strings.HasPrefix(table, "users") { // Add this condition
+			createUsersTable(table)
 		}
 	}
 	db.Use(middleware)
@@ -233,11 +262,31 @@ func createOrderDetailsTable(table string) {
     )`)
 }
 
+func createUsersTable(table string) {
+	db.Exec(`CREATE TABLE ` + table + ` (
+        id bigint PRIMARY KEY,
+        name text
+    )`)
+	dbNoID.Exec(`CREATE TABLE ` + table + ` (
+        id bigint PRIMARY KEY,
+        name text
+    )`)
+	dbRead.Exec(`CREATE TABLE ` + table + ` (
+        id bigint PRIMARY KEY,
+        name text
+    )`)
+	dbWrite.Exec(`CREATE TABLE ` + table + ` (
+        id bigint PRIMARY KEY,
+        name text
+    )`)
+}
+
 func dropTables() {
 	tables := []string{
 		"orders", "orders_0", "orders_1", "orders_2", "orders_3",
 		"order_details", "order_details_0", "order_details_1", "order_details_2", "order_details_3",
 		"categories",
+		"users", "users_0", "users_1", "users_2", "users_3",
 	}
 	for _, table := range tables {
 		db.Exec("DROP TABLE IF EXISTS " + table)
@@ -253,7 +302,7 @@ func dropTables() {
 }
 
 func TestMigrate(t *testing.T) {
-	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories", "order_details", "order_details_0", "order_details_1", "order_details_2", "order_details_3"}
+	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories", "order_details", "order_details_0", "order_details_1", "order_details_2", "order_details_3", "users", "users_0", "users_1", "users_2", "users_3"}
 	sort.Strings(targetTables)
 
 	// origin tables
@@ -262,18 +311,18 @@ func TestMigrate(t *testing.T) {
 	assert.Equal(t, tables, targetTables)
 
 	// drop table
-	db.Migrator().DropTable(Order{}, &Category{}, &OrderDetail{})
+	db.Migrator().DropTable(Order{}, &Category{}, &OrderDetail{}, &User{})
 	tables, _ = db.Migrator().GetTables()
 	assert.Equal(t, len(tables), 0)
 
 	// auto migrate
-	db.AutoMigrate(&Order{}, &Category{}, &OrderDetail{})
+	db.AutoMigrate(&Order{}, &Category{}, &OrderDetail{}, &User{})
 	tables, _ = db.Migrator().GetTables()
 	sort.Strings(tables)
 	assert.Equal(t, tables, targetTables)
 
 	// auto migrate again
-	err := db.AutoMigrate(&Order{}, &Category{}, &OrderDetail{})
+	err := db.AutoMigrate(&Order{}, &Category{}, &OrderDetail{}, &User{})
 	assert.Equal[error, error](t, err, nil)
 }
 
@@ -563,45 +612,30 @@ func TestDataRace(t *testing.T) {
 	}
 }
 
-func TestJoinShardedWithNonShardedTable(t *testing.T) {
-	// Reset the last_query before the test
-	middleware.querys.Store("last_query", "")
-
-	var result struct {
-		Order
-		CategoryName string
-	}
-
-	// Perform the query
-	err := db.Model(&Order{}).
-		Select("orders.*, categories.name AS category_name").
-		Joins("LEFT JOIN categories ON categories.id = orders.category_id").
-		Where("orders.user_id = ?", 100).
-		Scan(&result).Error
-
-	assert.NoError(t, err)
-
-	expected := `SELECT "orders_0".*, categories.name AS category_name FROM "orders_0" LEFT JOIN categories ON categories.id = "orders_0".category_id WHERE "orders_0"."user_id" = $1`
-	actual := middleware.LastQuery()
-
-	assert.Equal(t, expected, actual)
-}
-
 func TestJoinTwoShardedTables(t *testing.T) {
-	// Register the sharding configuration for OrderDetail
-	orderDetailConfig := shardingConfig
-	orderDetailConfig.ShardingKey = "order_id"
-	middlewareOrderDetail := Register(orderDetailConfig, &OrderDetail{})
-	db.Use(middlewareOrderDetail)
+	// Clean up tables before test
 
-	// Prepare data
-	order := Order{ID: 1, UserID: 100, Product: "iPhone"}
+	// Prepare data without hardcoded IDs
+	order := Order{UserID: 100, Product: "iPhone"}
 	db.Create(&order)
 
-	orderDetail := OrderDetail{ID: 1, OrderID: 1, Product: "iPhone Case", Quantity: 2}
+	orderDetail := OrderDetail{OrderID: order.ID, Product: "iPhone Case", Quantity: 2}
 	db.Create(&orderDetail)
 
-	// Join sharded Order with sharded OrderDetail
+	// Recalculate table suffixes based on generated IDs
+	orderShardIndex := uint(order.UserID) % shardingConfig.NumberOfShards
+	orderDetailShardIndex := uint(orderDetail.OrderID) % shardingConfigOrderDetails.NumberOfShards
+
+	orderTableSuffix := fmt.Sprintf("_%01d", orderShardIndex)
+	orderDetailTableSuffix := fmt.Sprintf("_%01d", orderDetailShardIndex)
+
+	// Expected query with sharded table names
+	expectedQuery := fmt.Sprintf(
+		`SELECT orders%s.*, order_details%s.product AS order_detail_product, order_details%s.quantity AS order_detail_quantity FROM orders%s JOIN order_details%s ON order_details%s.order_id = orders%s.id WHERE orders%s.user_id = $1 AND orders%s.id = $2`,
+		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix,
+		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix, orderTableSuffix, orderTableSuffix, orderTableSuffix)
+
+	// Perform the query
 	var results []struct {
 		Order
 		OrderDetailProduct  string
@@ -611,11 +645,8 @@ func TestJoinTwoShardedTables(t *testing.T) {
 	tx := db.Model(&Order{}).
 		Select("orders.*, order_details.product AS order_detail_product, order_details.quantity AS order_detail_quantity").
 		Joins("JOIN order_details ON order_details.order_id = orders.id").
-		Where("orders.user_id = ?", 100).
+		Where("orders.user_id = ? AND orders.id = ?", 100, order.ID).
 		Scan(&results)
-
-	// Expected query
-	expectedQuery := `SELECT orders_0.*, order_details_1.product AS order_detail_product, order_details_1.quantity AS order_detail_quantity FROM orders_0 JOIN order_details_1 ON order_details_1.order_id = orders_0.id WHERE orders_0.user_id = $1`
 
 	// Assert query
 	assertQueryResult(t, expectedQuery, tx)
@@ -623,22 +654,33 @@ func TestJoinTwoShardedTables(t *testing.T) {
 	// Assert results
 	assert.Equal(t, 1, len(results))
 	if len(results) == 0 {
-		assert.Error(t, fmt.Errorf("no results"))
-		return
+		t.Fatalf("no results")
 	}
 	assert.Equal(t, "iPhone", results[0].Product)
 	assert.Equal(t, "iPhone Case", results[0].OrderDetailProduct)
 	assert.Equal(t, 2, results[0].OrderDetailQuantity)
 }
 
-func TestSelfJoinShardedTable(t *testing.T) {
+func TestSelfJoinShardedTableWithAliases(t *testing.T) {
+	// Clean up tables before test
+	truncateTables(db, "orders", "orders_0")
+
 	// Prepare data
-	order1 := Order{ID: 1, UserID: 100, Product: "iPhone"}
+	order1 := Order{UserID: 100, Product: "iPhone"}
 	db.Create(&order1)
 	order2 := Order{UserID: 100, Product: "iPad"}
 	db.Create(&order2)
 
-	// Self-join on the sharded Order table
+	// Recalculate table suffix
+	orderShardIndex := uint(order1.UserID) % shardingConfig.NumberOfShards
+	orderTableSuffix := fmt.Sprintf("_%01d", orderShardIndex)
+
+	// Expected query with sharded table names and aliases
+	expectedQuery := fmt.Sprintf(
+		`SELECT o1.*, o2.product AS other_product FROM orders%s o1 LEFT JOIN orders%s o2 ON o1.user_id = o2.user_id AND o1.id <> o2.id WHERE o1.user_id = $1`,
+		orderTableSuffix, orderTableSuffix)
+
+	// Perform the query
 	var results []struct {
 		Order
 		OtherProduct string
@@ -650,9 +692,6 @@ func TestSelfJoinShardedTable(t *testing.T) {
 		Where("o1.user_id = ?", 100).
 		Scan(&results)
 
-	// Expected query
-	expectedQuery := `SELECT o1.*, o2.product AS other_product FROM orders_0 o1 LEFT JOIN orders_0 o2 ON o1.user_id = o2.user_id AND o1.id <> o2.id WHERE o1.user_id = $1`
-
 	// Assert query
 	assertQueryResult(t, expectedQuery, tx)
 
@@ -661,21 +700,31 @@ func TestSelfJoinShardedTable(t *testing.T) {
 }
 
 func TestJoinShardedTablesDifferentKeys(t *testing.T) {
-	// Adjust sharding configuration for OrderDetail
-	orderDetailConfig := shardingConfig
-	orderDetailConfig.ShardingKey = "order_id"
-	orderDetailConfig.NumberOfShards = shardingConfig.NumberOfShards
-	middlewareOrderDetail := Register(orderDetailConfig, &OrderDetail{})
-	db.Use(middlewareOrderDetail)
+	// Clean up tables before test
+	truncateTables(db, "orders", "orders_0", "orders_1", "orders_2", "orders_3",
+		"order_details", "order_details_0", "order_details_1", "order_details_2", "order_details_3")
 
 	// Prepare data
-	order := Order{UserID: 100, Product: "iPhone"}
+	order := Order{ID: 7, UserID: 100, Product: "iPhone"}
 	db.Create(&order)
 
 	orderDetail := OrderDetail{OrderID: order.ID, Product: "iPhone Case", Quantity: 2}
 	db.Create(&orderDetail)
 
-	// Join sharded Order with sharded OrderDetail
+	// Recalculate table suffixes based on generated IDs
+	orderShardIndex := uint(order.UserID) % shardingConfig.NumberOfShards
+	orderDetailShardIndex := uint(orderDetail.OrderID) % shardingConfigOrderDetails.NumberOfShards
+
+	orderTableSuffix := fmt.Sprintf("_%01d", orderShardIndex)
+	orderDetailTableSuffix := fmt.Sprintf("_%01d", orderDetailShardIndex)
+
+	// Expected query with sharded table names
+	expectedQuery := fmt.Sprintf(
+		`SELECT orders%s.*, order_details%s.product AS order_detail_product, order_details%s.quantity AS order_detail_quantity FROM orders%s RIGHT JOIN order_details%s ON order_details%s.order_id = orders%s.id WHERE orders%s.user_id = $1 AND orders%s.id = $2`,
+		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix,
+		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix, orderTableSuffix, orderTableSuffix, orderTableSuffix)
+
+	// Perform the query
 	var results []struct {
 		Order
 		OrderDetailProduct  string
@@ -685,20 +734,8 @@ func TestJoinShardedTablesDifferentKeys(t *testing.T) {
 	tx := db.Model(&Order{}).
 		Select("orders.*, order_details.product AS order_detail_product, order_details.quantity AS order_detail_quantity").
 		Joins("RIGHT JOIN order_details ON order_details.order_id = orders.id").
-		Where("orders.user_id = ?", 100).
+		Where("orders.user_id = ? AND orders.id = ?", 100, order.ID).
 		Scan(&results)
-
-	// Compute table suffixes directly
-	orderShardIndex := uint(order.UserID) % shardingConfig.NumberOfShards
-	orderDetailShardIndex := uint(orderDetail.OrderID) % orderDetailConfig.NumberOfShards
-
-	orderTableSuffix := fmt.Sprintf("_%01d", orderShardIndex)
-	orderDetailTableSuffix := fmt.Sprintf("_%01d", orderDetailShardIndex)
-
-	// Expected query with sharded table names
-	expectedQuery := fmt.Sprintf(`SELECT orders%s.*, order_details%s.product AS order_detail_product, order_details%s.quantity AS order_detail_quantity FROM orders%s RIGHT JOIN order_details%s ON order_details%s.order_id = orders%s.id WHERE orders%s.user_id = $1`,
-		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix,
-		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix, orderTableSuffix, orderTableSuffix)
 
 	// Assert query
 	assertQueryResult(t, expectedQuery, tx)
@@ -706,17 +743,294 @@ func TestJoinShardedTablesDifferentKeys(t *testing.T) {
 	// Assert results
 	assert.Equal(t, 1, len(results))
 	if len(results) == 0 {
-		assert.Error(t, fmt.Errorf("no results"))
-		return
+		t.Fatalf("no results")
 	}
 	assert.Equal(t, "iPhone", results[0].Product)
 	assert.Equal(t, "iPhone Case", results[0].OrderDetailProduct)
 	assert.Equal(t, 2, results[0].OrderDetailQuantity)
 }
 
+func TestJoinShardedWithNonShardedTableWithConditions(t *testing.T) {
+	// Clean up tables before test
+	truncateTables(db, "orders", "orders_0", "categories")
+
+	// Prepare data
+	category := Category{Name: "Electronics"}
+	db.Create(&category)
+
+	order := Order{UserID: 100, Product: "iPhone", CategoryID: category.ID}
+	db.Create(&order)
+
+	// Recalculate table suffix based on UserID
+	orderShardIndex := uint(order.UserID) % shardingConfig.NumberOfShards
+	orderTableSuffix := fmt.Sprintf("_%01d", orderShardIndex)
+
+	// Expected query with sharded table name
+	expectedQuery := fmt.Sprintf(
+		`SELECT orders%s.*, categories.name AS category_name FROM orders%s JOIN categories ON categories.id = orders%s.category_id WHERE orders%s.user_id = $1 AND categories.name = $2`,
+		orderTableSuffix, orderTableSuffix, orderTableSuffix, orderTableSuffix)
+
+	// Perform the query
+	var results []struct {
+		Order
+		CategoryName string
+	}
+
+	tx := db.Model(&Order{}).
+		Select("orders.*, categories.name AS category_name").
+		Joins("JOIN categories ON categories.id = orders.category_id").
+		Where("orders.user_id = ? AND categories.name = ?", 100, "Electronics").
+		Scan(&results)
+
+	// Assert query
+	assertQueryResult(t, expectedQuery, tx)
+
+	// Assert results
+	assert.Equal(t, 1, len(results))
+	if len(results) == 0 {
+		t.Fatalf("no results")
+	}
+	assert.Equal(t, "iPhone", results[0].Product)
+	assert.Equal(t, "Electronics", results[0].CategoryName)
+}
+
+func TestJoinShardedTableWithSubquery(t *testing.T) {
+	// Clean up tables before test
+	truncateTables(db, "orders", "orders_0", "order_details", "order_details_0")
+
+	// Prepare data
+	order := Order{UserID: 100, Product: "iPhone"}
+	db.Create(&order)
+
+	orderDetail := OrderDetail{OrderID: order.ID, Product: "iPhone Case", Quantity: 2}
+	db.Create(&orderDetail)
+
+	// Recalculate table suffixes
+	orderShardIndex := uint(order.UserID) % shardingConfig.NumberOfShards
+	orderDetailShardIndex := uint(orderDetail.OrderID) % shardingConfigOrderDetails.NumberOfShards
+
+	orderTableSuffix := fmt.Sprintf("_%01d", orderShardIndex)
+	orderDetailTableSuffix := fmt.Sprintf("_%01d", orderDetailShardIndex)
+
+	// Expected query with sharded table names
+	expectedQuery := fmt.Sprintf(
+		`SELECT orders%s.* FROM orders%s JOIN (SELECT order_details%s.order_id FROM order_details%s WHERE order_details%s.quantity > $1) AS od ON od.order_id = orders%s.id WHERE orders%s.user_id = $2`,
+		orderTableSuffix, orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix, orderTableSuffix, orderTableSuffix)
+
+	// Perform the query
+	var results []Order
+
+	subquery := db.Table("order_details").Select("order_id").Where("order_details.quantity > ?", 1)
+	tx := db.Model(&Order{}).
+		Joins("JOIN (?) AS od ON od.order_id = orders.id", subquery).
+		Where("orders.user_id = ?", 100).
+		Scan(&results)
+
+	// Assert query
+	assertQueryResult(t, expectedQuery, tx)
+
+	// Assert results
+	assert.Equal(t, 1, len(results))
+	if len(results) == 0 {
+		t.Fatalf("no results")
+	}
+	assert.Equal(t, "iPhone", results[0].Product)
+}
+
+func TestJoinShardedTablesDifferentJoinTypes(t *testing.T) {
+	// Clean up tables before test
+	truncateTables(db, "orders", "orders_0", "order_details", "order_details_0")
+
+	// Prepare data
+	order := Order{UserID: 100, Product: "iPhone"}
+	db.Create(&order)
+
+	orderDetail := OrderDetail{OrderID: order.ID, Product: "iPhone Case", Quantity: 2}
+	db.Create(&orderDetail)
+
+	// Recalculate table suffixes
+	orderShardIndex := uint(order.UserID) % shardingConfig.NumberOfShards
+	orderDetailShardIndex := uint(orderDetail.OrderID) % shardingConfigOrderDetails.NumberOfShards
+
+	orderTableSuffix := fmt.Sprintf("_%01d", orderShardIndex)
+	orderDetailTableSuffix := fmt.Sprintf("_%01d", orderDetailShardIndex)
+
+	// List of join types to test
+	joinTypes := []string{"INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}
+
+	for _, joinType := range joinTypes {
+		// Expected query with sharded table names and join type
+		expectedQuery := fmt.Sprintf(
+			`SELECT orders%s.*, order_details%s.product AS order_detail_product FROM orders%s %s order_details%s ON order_details%s.order_id = orders%s.id WHERE orders%s.user_id = $1 AND orders%s.id = $2`,
+			orderTableSuffix, orderDetailTableSuffix, orderTableSuffix, joinType, orderDetailTableSuffix, orderDetailTableSuffix, orderTableSuffix, orderTableSuffix, orderTableSuffix)
+
+		// Perform the query
+		var results []struct {
+			Order
+			OrderDetailProduct string
+		}
+
+		tx := db.Model(&Order{}).
+			Select("orders.*, order_details.product AS order_detail_product").
+			Joins(fmt.Sprintf("%s order_details ON order_details.order_id = orders.id", joinType)).
+			Where("orders.user_id = ? AND orders.id = ?", 100, order.ID).
+			Scan(&results)
+
+		// Assert query
+		assertQueryResult(t, expectedQuery, tx)
+
+		// Assert results
+		if joinType == "INNER JOIN" || joinType == "LEFT JOIN" || joinType == "FULL JOIN" {
+			assert.Equal(t, 1, len(results))
+			if len(results) == 0 {
+				t.Fatalf("no results for join type %s", joinType)
+			}
+			assert.Equal(t, "iPhone", results[0].Product)
+			assert.Equal(t, "iPhone Case", results[0].OrderDetailProduct)
+		} else if joinType == "RIGHT JOIN" {
+			// todo
+		}
+	}
+}
+func TestJoinWithComplexConditions(t *testing.T) {
+	// Clean up tables before test
+	truncateTables(db, "orders", "orders_0", "order_details", "order_details_0", "users", "users_0", "users_1", "users_2", "users_3")
+
+	// Prepare data
+	user := User{ID: 100, Name: "John Doe"}
+	db.Create(&user)
+
+	order := Order{UserID: user.ID, Product: "iPhone"}
+	db.Create(&order)
+
+	orderDetail := OrderDetail{OrderID: order.ID, Product: "iPhone Case", Quantity: 2}
+	db.Create(&orderDetail)
+
+	// Recalculate table suffixes
+	userShardIndex := uint(user.ID) % shardingConfigUser.NumberOfShards
+	orderShardIndex := uint(order.UserID) % shardingConfig.NumberOfShards
+	orderDetailShardIndex := uint(orderDetail.OrderID) % shardingConfigOrderDetails.NumberOfShards
+
+	userTableSuffix := fmt.Sprintf("_%01d", userShardIndex)
+	orderTableSuffix := fmt.Sprintf("_%01d", orderShardIndex)
+	orderDetailTableSuffix := fmt.Sprintf("_%01d", orderDetailShardIndex)
+
+	// Expected query with sharded table names
+	expectedQuery := fmt.Sprintf(
+		`SELECT orders%s.*, order_details%s.product AS order_detail_product, users%s.name AS user_name FROM orders%s JOIN order_details%s ON order_details%s.order_id = orders%s.id JOIN users%s ON users%s.id = orders%s.user_id WHERE orders%s.user_id = $1 AND order_details%s.quantity > $2`,
+		orderTableSuffix, orderDetailTableSuffix, userTableSuffix,
+		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix, orderTableSuffix,
+		userTableSuffix, userTableSuffix, orderTableSuffix,
+		orderTableSuffix, orderDetailTableSuffix)
+
+	// Perform the query
+	var results []struct {
+		Order
+		OrderDetailProduct string
+		UserName           string
+	}
+
+	tx := db.Model(&Order{}).
+		Select("orders.*, order_details.product AS order_detail_product, users.name AS user_name").
+		Joins("JOIN order_details ON order_details.order_id = orders.id").
+		Joins("JOIN users ON users.id = orders.user_id").
+		Where("orders.user_id = ? AND order_details.quantity > ?", user.ID, 1).
+		Scan(&results)
+
+	// Assert query
+	assertQueryResult(t, expectedQuery, tx)
+
+	// Assert results
+	assert.Equal(t, 1, len(results))
+	if len(results) == 0 {
+		t.Fatalf("no results")
+	}
+	assert.Equal(t, "iPhone", results[0].Product)
+	assert.Equal(t, "iPhone Case", results[0].OrderDetailProduct)
+	assert.Equal(t, "John Doe", results[0].UserName)
+}
+
+func TestJoinWithAggregation(t *testing.T) {
+	// Clean up tables before test
+	truncateTables(db, "orders", "orders_0", "order_details", "order_details_0")
+
+	// Prepare data
+	order := Order{UserID: 100, Product: "iPhone"}
+	db.Create(&order)
+
+	orderDetail1 := OrderDetail{OrderID: order.ID, Product: "iPhone Case", Quantity: 2}
+	db.Create(&orderDetail1)
+
+	orderDetail2 := OrderDetail{OrderID: order.ID, Product: "Screen Protector", Quantity: 1}
+	db.Create(&orderDetail2)
+
+	// Recalculate table suffixes
+	orderShardIndex := uint(order.UserID) % shardingConfig.NumberOfShards
+	orderDetailShardIndex := uint(orderDetail1.OrderID) % shardingConfigOrderDetails.NumberOfShards
+
+	orderTableSuffix := fmt.Sprintf("_%01d", orderShardIndex)
+	orderDetailTableSuffix := fmt.Sprintf("_%01d", orderDetailShardIndex)
+
+	// Expected query with sharded table names
+	expectedQuery := fmt.Sprintf(
+		`SELECT orders%s.*, sum(order_details%s.quantity) AS total_quantity FROM orders%s JOIN order_details%s ON order_details%s.order_id = orders%s.id WHERE orders%s.user_id = $1 AND orders%s.id = $2 GROUP BY orders%s.id`,
+		orderTableSuffix, orderDetailTableSuffix,
+		orderTableSuffix, orderDetailTableSuffix, orderDetailTableSuffix, orderTableSuffix,
+		orderTableSuffix, orderTableSuffix, orderTableSuffix)
+
+	// Perform the query
+	var results []struct {
+		Order
+		TotalQuantity int
+	}
+
+	tx := db.Model(&Order{}).
+		Select("orders.*, SUM(order_details.quantity) AS total_quantity").
+		Joins("JOIN order_details ON order_details.order_id = orders.id").
+		Where("orders.user_id = ? AND orders.id = ?", 100, order.ID).
+		Group("orders.id").
+		Scan(&results)
+
+	// Assert query
+	assertQueryResult(t, expectedQuery, tx)
+
+	// Assert results
+	assert.Equal(t, 1, len(results))
+	if len(results) == 0 {
+		t.Fatalf("no results")
+	}
+	assert.Equal(t, "iPhone", results[0].Product)
+	assert.Equal(t, 3, results[0].TotalQuantity) // 2 + 1 = 3
+}
+
 func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {
 	t.Helper()
-	assert.Equal(t, toDialect(expected), middleware.LastQuery())
+	normalize := func(query string) string {
+		// Remove quotes around identifiers
+		re := regexp.MustCompile(`"(\w+)"`)
+		return re.ReplaceAllString(query, `$1`)
+	}
+	normalizedExpected := normalize(toDialect(expected))
+	normalizedActual := normalize(middleware.LastQuery())
+	assert.Equal(t, normalizedExpected, normalizedActual)
+}
+
+func assertInsertResult(t *testing.T, expected string, tx *gorm.DB, mw *Sharding) {
+	t.Helper()
+	normalize := func(query string) string {
+		// Remove quotes around identifiers
+		re := regexp.MustCompile(`"(\w+)"`)
+		return re.ReplaceAllString(query, `$1`)
+	}
+	normalizedExpected := normalize(toDialect(expected))
+	normalizedActual := normalize(mw.LastQuery())
+	assert.Equal(t, normalizedExpected, normalizedActual)
+}
+
+func truncateTables(db *gorm.DB, tables ...string) {
+	for _, table := range tables {
+		db.Exec(fmt.Sprintf("TRUNCATE TABLE %s RESTART IDENTITY CASCADE", table))
+	}
 }
 
 func toDialect(sql string) string {
