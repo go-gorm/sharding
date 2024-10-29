@@ -314,14 +314,11 @@ func replaceSelectFieldTableName(oldTableName, tableName string, columns *sqlpar
 	rcs := []*sqlparser.ResultColumn(*columns)
 	for i := 0; i < len(rcs); i++ {
 		rc := rcs[i]
-		if n, ok := rc.Expr.(*sqlparser.BinaryExpr); ok {
-			if q, ok2 := n.X.(*sqlparser.QualifiedRef); ok2 {
-				if q.Table.Name == oldTableName {
-					n.X.(*sqlparser.QualifiedRef).Table.Name = tableName
-				}
+		if n, ok := rc.Expr.(*sqlparser.QualifiedRef); ok {
+			if n.Table.Name == oldTableName {
+				n.Table.Name = tableName
 			}
 		}
-
 	}
 	r := sqlparser.OutputNames(rcs)
 	return &r
@@ -484,6 +481,7 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 			replaceConditionTableName(tableName, newTable.Name.Name, stmt.Condition)
 			stQuery = stmt.String()
 		}
+		slog.Debug(stQuery)
 	}
 
 	return
