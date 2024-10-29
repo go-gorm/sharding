@@ -3,6 +3,7 @@ package sharding
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -28,7 +29,7 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 		curTime = time.Now()
 	)
 
-	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
+	ftQuery, stQuery, table, err := pool.sharding.resolve(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +37,11 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	pool.sharding.querys.Store("last_query", stQuery)
 
 	if table != "" {
-		if r, ok := pool.sharding.configs[table]; ok {
+		key := table
+		if shardingKey, ok := ctx.Value("sharding_key").(string); ok {
+			key = fmt.Sprintf("%s_%v", table, shardingKey)
+		}
+		if r, ok := pool.sharding.configs[key]; ok {
 			if r.DoubleWrite {
 				pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
 					result, _ := pool.ConnPool.ExecContext(ctx, ftQuery, args...)
@@ -63,7 +68,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...any
 		curTime = time.Now()
 	)
 
-	_, stQuery, _, err := pool.sharding.resolve(query, args...)
+	_, stQuery, _, err := pool.sharding.resolve(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +85,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...any
 }
 
 func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	_, query, _, _ = pool.sharding.resolve(query, args...)
+	_, query, _, _ = pool.sharding.resolve(ctx, query, args...)
 	pool.sharding.querys.Store("last_query", query)
 
 	return pool.ConnPool.QueryRowContext(ctx, query, args...)

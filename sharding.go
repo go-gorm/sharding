@@ -1,6 +1,7 @@
 package sharding
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -107,6 +108,13 @@ func Register(config Config, tables ...any) *Sharding {
 	return &Sharding{
 		_config: config,
 		_tables: tables,
+	}
+}
+
+// enables sharding for a single table with flexible support for multiple partition keys.
+func RegisterWithKeys(configs map[string]Config) *Sharding {
+	return &Sharding{
+		configs: configs,
 	}
 }
 
@@ -297,7 +305,7 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 }
 
 // resolve split the old query to full table query and sharding table query
-func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableName string, err error) {
+func (s *Sharding) resolve(ctx context.Context, query string, args ...any) (ftQuery, stQuery, tableName string, err error) {
 	ftQuery = query
 	stQuery = query
 	if len(s.configs) == 0 {
@@ -344,7 +352,12 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 	}
 
 	tableName = table.Name.Name
-	r, ok := s.configs[tableName]
+	key := tableName
+	// If sharding key is set in context, use it to get the sharding config.
+	if shardingKey, ok := ctx.Value("sharding_key").(string); ok {
+		key = fmt.Sprintf("%s_%v", tableName, shardingKey)
+	}
+	r, ok := s.configs[key]
 	if !ok {
 		return
 	}
