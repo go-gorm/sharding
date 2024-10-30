@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 	"hash/crc32"
 	"log"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -102,6 +103,8 @@ type Config struct {
 	//		return nodes[tableIdx].Generate().Int64()
 	//	}
 	PrimaryKeyGeneratorFn func(tableIdx int64) int64
+
+	engine DatabaseEngine
 }
 
 func Register(config interface{}, tables ...interface{}) *Sharding {
@@ -285,6 +288,7 @@ func (s *Sharding) LastQuery() string {
 func (s *Sharding) Initialize(db *gorm.DB) error {
 	db.Dialector = NewShardingDialector(db.Dialector, s)
 	s.DB = db
+	s.setDatabaseEngine()
 	s.registerCallbacks(db)
 
 	for t, c := range s.configs {
@@ -638,19 +642,21 @@ func collectConditionsFromSelect(selectStmt *pg_query.SelectStmt) []*pg_query.No
 }
 
 // assignIDToInsert generates a new ID and assigns it to the insert statement's VALUES list
+// assignIDToInsert generates a new ID and assigns it to the insert statement's VALUES list
 func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, args *[]interface{}) error {
-	// Check if 'id' is already present in the columns (case-insensitive)
+	// Check if 'id' column is present
 	hasID := false
 	idIndex := -1
 	for i, colItem := range insertStmt.Cols {
 		resTarget, ok := colItem.Node.(*pg_query.Node_ResTarget)
-		if ok {
-			resTarget.ResTarget.Location = -1 // Force quoting of column names
-			if strings.ToLower(resTarget.ResTarget.Name) == "id" {
-				hasID = true
-				idIndex = i
-				break
-			}
+		if !ok {
+			return fmt.Errorf("unsupported column item type: %T", colItem.Node)
+		}
+		colName := resTarget.ResTarget.Name
+		if strings.ToLower(colName) == "id" {
+			hasID = true
+			idIndex = i
+			break
 		}
 	}
 
@@ -675,7 +681,9 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 		// Find current max parameter number
 		maxParamNumber := getMaxParamNumber(&pg_query.Node{Node: &pg_query.Node_InsertStmt{InsertStmt: insertStmt}})
 
-		// Iterate through each VALUES list to check and assign 'id' if necessary
+		log.Printf("Max param number before assigning id: %d\n", maxParamNumber)
+
+		// Iterate through each VALUES list to assign unique 'id's
 		for idx, valuesList := range valuesSelect.ValuesLists {
 			listNode, ok := valuesList.Node.(*pg_query.Node_List)
 			if !ok {
@@ -703,104 +711,32 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 			log.Printf("Current 'id' value in VALUES list %d: %d\n", idx, idInt64)
 
 			if idInt64 == 0 {
-				// Generate a new ID since the provided 'id' is zero
-				generatedID := r.PrimaryKeyGeneratorFn(int64(idx))
-				log.Printf("Generated new 'id' for VALUES list %d: %d\n", idx, generatedID)
+				generatedID := r.PrimaryKeyGeneratorFn(int64(idx)) // Generate unique ID for each list
+				log.Printf("Generated ID for VALUES list %d: %d\n", idx, generatedID)
 
-				// Increment parameter index
-				maxParamNumber++
-
-				// Append the generated ID to args
-				*args = append(*args, generatedID)
-
-				// Assign a ParamRef node with number = maxParamNumber
+				// Assign the generated ID as a literal value instead of a parameter
 				listNode.List.Items[idIndex] = &pg_query.Node{
-					Node: &pg_query.Node_ParamRef{
-						ParamRef: &pg_query.ParamRef{
-							Number: int32(maxParamNumber),
+					Node: &pg_query.Node_AConst{
+						AConst: &pg_query.A_Const{
+							Val: &pg_query.A_Const_Ival{
+								Ival: &pg_query.Integer{Ival: int32(generatedID)},
+							},
 						},
 					},
 				}
-
-				log.Printf("Assigned generated 'id' to VALUES list %d as ParamRef number %d\n", idx, maxParamNumber)
 			} else {
 				log.Printf("'id' is already set to %d in VALUES list %d; no action taken.\n", idInt64, idx)
 			}
 		}
-	} else {
-		// Generate a new ID
-		generatedID := r.PrimaryKeyGeneratorFn(0)
-
-		if generatedID == 0 {
-			// Do not add 'id' column or assign value if generatedID is 0
-			return nil
-		}
-
-		log.Println("Handling missing 'id' column.")
-		// 'id' is not present; add it to the columns and assign a new ID
-		insertStmt.Cols = append(insertStmt.Cols, &pg_query.Node{
-			Node: &pg_query.Node_ResTarget{
-				ResTarget: &pg_query.ResTarget{
-					Name:     "id",
-					Location: -1, // Force quoting
-				},
-			},
-		})
-		log.Println("Appended 'id' column to INSERT statement.")
-
-		// Access the SelectStmt to get the VALUES lists
-		if insertStmt.SelectStmt == nil {
-			return fmt.Errorf("insert statement has no SelectStmt")
-		}
-
-		selectNode, ok := insertStmt.SelectStmt.Node.(*pg_query.Node_SelectStmt)
-		if !ok {
-			return fmt.Errorf("insert statement SelectStmt is not of type SelectStmt")
-		}
-
-		valuesSelect := selectNode.SelectStmt
-		if len(valuesSelect.ValuesLists) == 0 {
-			return fmt.Errorf("insert statement has no VALUES list")
-		}
-
-		// Find current max parameter number
-		maxParamNumber := getMaxParamNumber(&pg_query.Node{Node: &pg_query.Node_InsertStmt{InsertStmt: insertStmt}})
-
-		// Iterate through each VALUES list to append the generated 'id'
-		for idx, valuesList := range valuesSelect.ValuesLists {
-			listNode, ok := valuesList.Node.(*pg_query.Node_List)
-			if !ok {
-				return fmt.Errorf("unsupported values list type when assigning id")
-			}
-
-			// Generate a new ID
-			generatedID := r.PrimaryKeyGeneratorFn(int64(idx))
-			log.Printf("Generated new 'id' for VALUES list %d: %d\n", idx, generatedID)
-
-			// Increment parameter index
-			maxParamNumber++
-
-			// Append the generated ID to args
-			*args = append(*args, generatedID)
-
-			// Assign a ParamRef node with number = maxParamNumber
-			listNode.List.Items = append(listNode.List.Items, &pg_query.Node{
-				Node: &pg_query.Node_ParamRef{
-					ParamRef: &pg_query.ParamRef{
-						Number: int32(maxParamNumber),
-					},
-				},
-			})
-
-			log.Printf("Appended 'id' value to VALUES list %d as ParamRef number %d\n", idx, maxParamNumber)
-		}
 	}
+	// Removed the 'else' block to prevent adding 'id' when it's absent
 
 	return nil
 }
 
 func getMaxParamNumber(node *pg_query.Node) int {
 	maxParamNumber := 0
+
 	var traverse func(n *pg_query.Node)
 	traverse = func(n *pg_query.Node) {
 		if n == nil {
@@ -811,8 +747,43 @@ func getMaxParamNumber(node *pg_query.Node) int {
 			if int(v.ParamRef.Number) > maxParamNumber {
 				maxParamNumber = int(v.ParamRef.Number)
 			}
+		case *pg_query.Node_SelectStmt:
+			traverse(v.SelectStmt.WhereClause)
+			for _, vl := range v.SelectStmt.ValuesLists {
+				traverse(vl)
+			}
+			for _, c := range v.SelectStmt.FromClause {
+				traverse(c)
+			}
+			for _, sort := range v.SelectStmt.SortClause {
+				traverse(sort)
+			}
+			traverse(v.SelectStmt.HavingClause)
+			for _, group := range v.SelectStmt.GroupClause {
+				traverse(group)
+			}
+		case *pg_query.Node_InsertStmt:
+			traverse(v.InsertStmt.SelectStmt)
+			for _, col := range v.InsertStmt.Cols {
+				traverse(col)
+			}
+		case *pg_query.Node_List:
+			for _, item := range v.List.Items {
+				traverse(item)
+			}
+		case *pg_query.Node_ResTarget:
+			traverse(v.ResTarget.Val)
+		case *pg_query.Node_AExpr:
+			traverse(v.AExpr.Lexpr)
+			traverse(v.AExpr.Rexpr)
+		case *pg_query.Node_BoolExpr:
+			for _, arg := range v.BoolExpr.Args {
+				traverse(arg)
+			}
+		case *pg_query.Node_ColumnRef:
+			// No action needed
 		default:
-			// Use reflection to traverse all fields recursively
+			// Traverse other node types via reflection
 			val := reflect.ValueOf(v)
 			if val.Kind() == reflect.Ptr && !val.IsNil() {
 				val = val.Elem()
@@ -839,6 +810,7 @@ func getMaxParamNumber(node *pg_query.Node) int {
 			}
 		}
 	}
+
 	traverse(node)
 	return maxParamNumber
 }
@@ -891,7 +863,7 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 		}
 	}
 
-	if !keyFound && id == 0 {
+	if !keyFound {
 		return nil, 0, false, ErrMissingShardingKey
 	}
 
@@ -900,25 +872,37 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 
 func toInt64(value interface{}) (int64, error) {
 	switch v := value.(type) {
-	case int64:
-		return v, nil
-	case int32:
-		return int64(v), nil
 	case int:
 		return int64(v), nil
-	case uint64:
+	case int8:
+		return int64(v), nil
+	case int16:
+		return int64(v), nil
+	case int32:
+		return int64(v), nil
+	case int64:
+		return v, nil
+	case uint:
+		return int64(v), nil
+	case uint8:
+		return int64(v), nil
+	case uint16:
 		return int64(v), nil
 	case uint32:
 		return int64(v), nil
-	case uint:
+	case uint64:
+		if v > math.MaxInt64 {
+			return 0, fmt.Errorf("uint64 value %d overflows int64", v)
+		}
 		return int64(v), nil
-	case string:
-		return strconv.ParseInt(v, 10, 64)
+	case float32:
+		return int64(v), nil
+	case float64:
+		return int64(v), nil
 	default:
-		return 0, fmt.Errorf("cannot convert value to int64: %v", value)
+		return 0, fmt.Errorf("unsupported type for conversion to int64: %T", v)
 	}
 }
-
 func collectTablesFromSelect(selectStmt *pg_query.SelectStmt) []string {
 	var tables []string
 	for _, fromItem := range selectStmt.FromClause {
@@ -1099,7 +1083,7 @@ func replaceSelectStmtTableName(selectStmt *pg_query.SelectStmt, tableMap map[st
 func extractValueFromExpr(expr *pg_query.Node, args []interface{}) (interface{}, error) {
 	switch v := expr.Node.(type) {
 	case *pg_query.Node_ParamRef:
-		// Positional parameter; PostgreSQL parameters are 1-based
+		// PostgreSQL parameters are 1-based
 		index := int(v.ParamRef.Number) - 1
 		if index >= 0 && index < len(args) {
 			return args[index], nil
@@ -1164,6 +1148,7 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 	// If sharding key is not found, attempt to find 'id'
 	if !keyFound {
 		for _, condition := range conditions {
+			fmt.Println("Traversing condition for 'id'")
 			idFound, idValue, err = traverseConditionForKey("id", condition, args, knownKeys, aliasMap)
 			if idFound || err != nil {
 				break
@@ -1344,14 +1329,18 @@ func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err 
 	if keyFind {
 		suffix, err = r.ShardingAlgorithm(value)
 		if err != nil {
+			log.Printf("Error in ShardingAlgorithm: %v\n", err)
 			return
 		}
+		log.Printf("Sharding key value: %v, Suffix: %s\n", value, suffix)
 	} else {
 		if r.ShardingAlgorithmByPrimaryKey == nil {
 			err = fmt.Errorf("there is not sharding key and ShardingAlgorithmByPrimaryKey is not configured")
+			log.Printf("Error: %v\n", err)
 			return
 		}
 		suffix = r.ShardingAlgorithmByPrimaryKey(id)
+		log.Printf("Sharding by primary key: %d, Suffix: %s\n", id, suffix)
 	}
 	return
 }

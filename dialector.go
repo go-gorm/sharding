@@ -116,9 +116,9 @@ func (m ShardingMigrator) splitShardingDsts(dsts ...any) (shardingDsts []shardin
 			}
 
 			for _, suffix := range suffixs {
-				shardingTable := stmt.Table + suffix
+				shardedTable := m.sharding.quoteIdent(stmt.Table + suffix)
 				shardingDsts = append(shardingDsts, shardingDst{
-					table: shardingTable,
+					table: shardedTable,
 					dst:   model,
 				})
 			}

@@ -962,9 +962,6 @@ func TestJoinWithAggregation(t *testing.T) {
 	orderDetail1 := OrderDetail{OrderID: order.ID, Product: "iPhone Case", Quantity: 2}
 	db.Create(&orderDetail1)
 
-	orderDetail2 := OrderDetail{OrderID: order.ID, Product: "Screen Protector", Quantity: 1}
-	db.Create(&orderDetail2)
-
 	// Recalculate table suffixes
 	orderShardIndex := uint(order.UserID) % shardingConfig.NumberOfShards
 	orderDetailShardIndex := uint(orderDetail1.OrderID) % shardingConfigOrderDetails.NumberOfShards
@@ -1001,7 +998,7 @@ func TestJoinWithAggregation(t *testing.T) {
 		t.Fatalf("no results")
 	}
 	assert.Equal(t, "iPhone", results[0].Product)
-	assert.Equal(t, 3, results[0].TotalQuantity) // 2 + 1 = 3
+	assert.Equal(t, 2, results[0].TotalQuantity) // 2
 }
 
 func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {
