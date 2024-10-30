@@ -152,33 +152,34 @@ func Test_Gorm_Sharding_WithKeys(t *testing.T) {
 	// Initialize Gorm DB
 	db := InitGormDb()
 
-	// Sharding strategy configuration
-	configWithOrderYear := sharding.Config{
-		ShardingKey:           "order_year",
-		ShardingAlgorithm:     customShardingAlgorithmWithOrderYear, // Use custom sharding algorithm
-		PrimaryKeyGenerator:   sharding.PKCustom,                    // Use custom primary key generation function
-		PrimaryKeyGeneratorFn: customePrimaryKeyGeneratorFn,         // Custom primary key generation function
-	}
-	configWithUserId := sharding.Config{
-		ShardingKey:         "user_id",
-		NumberOfShards:      4,
-		ShardingAlgorithm:   customShardingAlgorithmWithUserId, // Use custom sharding algorithm
-		PrimaryKeyGenerator: sharding.PKSnowflake,              // Use Snowflake algorithm to generate primary key
-	}
-	configWithOrderId := sharding.Config{
-		ShardingKey:           "order_id",
-		ShardingAlgorithm:     customShardingAlgorithmWithOrderId, // Use custom sharding algorithm
-		PrimaryKeyGenerator:   sharding.PKCustom,
-		PrimaryKeyGeneratorFn: customePrimaryKeyGeneratorFn,
-	}
-	mapConfig := make(map[string]sharding.Config)
-	mapConfig["orders_order_year"] = configWithOrderYear
-	mapConfig["orders_user_id"] = configWithUserId
-	mapConfig["orders_order_id"] = configWithOrderId
-
 	// Configure Gorm Sharding middleware, register sharding strategy configuration
-	middleware := sharding.RegisterWithKeys(mapConfig) // Logical table name is "orders"
-	db.Use(middleware)
+	// Logical table name is "orders"
+	db.Use(sharding.RegisterWithKeys(map[string]sharding.Config{
+		"orders_order_year": {
+			ShardingKey:           "order_year",
+			// Use custom sharding algorithm
+			ShardingAlgorithm:     customShardingAlgorithmWithOrderYear,
+			// Use custom primary key generation function
+			PrimaryKeyGenerator:   sharding.PKCustom,
+			// Custom primary key generation function
+			PrimaryKeyGeneratorFn: customePrimaryKeyGeneratorFn,
+		},
+		"orders_user_id": {
+			ShardingKey:         "user_id",
+			NumberOfShards:      4,
+			// Use custom sharding algorithm
+			ShardingAlgorithm:   customShardingAlgorithmWithUserId,
+			// Use Snowflake algorithm to generate primary key
+			PrimaryKeyGenerator: sharding.PKSnowflake,
+		},
+		"orders_order_id": {
+			ShardingKey:           "order_id",
+			// Use custom sharding algorithm
+			ShardingAlgorithm:     customShardingAlgorithmWithOrderId,
+			PrimaryKeyGenerator:   sharding.PKCustom,
+			PrimaryKeyGeneratorFn: customePrimaryKeyGeneratorFn,
+		},
+	}))
 
 	// Insert and query examples based on order_year sharding key strategy
 	InsertOrderByOrderYearKey(db)
@@ -231,7 +232,7 @@ func FindByOrderYearKey(db *gorm.DB, orderYear int) ([]Order, error) {
 	if err != nil {
 		fmt.Println("Error querying orders:", err)
 	}
-	fmt.Printf("sharding key order_year Selected orders: %#v\n", orders)
+	fmt.Printf("sharding key order_year Selected orders: %#v\nn", orders)
 	return orders, err
 }
 
