@@ -389,7 +389,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		if selectStmt.WhereClause != nil {
 			conditions = append(conditions, selectStmt.WhereClause)
 		}
-		// NEW: Collect conditions from JOINs
+		// Collect conditions from JOINs
 		joinConditions := collectJoinConditions(selectStmt)
 		conditions = append(conditions, joinConditions...)
 
@@ -436,10 +436,10 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		return ftQuery, stQuery, "", fmt.Errorf("unsupported statement type")
 	}
 
-	knownKeys := make(map[string]interface{})
-
-	// Process tables and conditions to update with sharded table names
+	// Initialize a map to hold table-specific sharded names
 	tableMap := make(map[string]string) // originalTableName -> shardedTableName
+
+	// Iterate through each table to determine its sharded name
 	for _, originalTableName := range tables {
 		schemaName := ""
 		tableName = originalTableName
@@ -571,20 +571,17 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 				aliasMap = collectTableAliases(selectStmt)
 			}
 
-			value, id, keyFound, err := s.extractShardingKeyFromConditions(shardingKey, conditions, args, knownKeys, aliasMap)
+			// Extract sharding key for the current table
+			value, id, keyFound, err := s.extractShardingKeyFromConditions(shardingKey, conditions, args, aliasMap, fullTableName)
 			if err != nil {
+				log.Printf("Error extracting sharding key for table '%s': %v\n", originalTableName, err)
 				return ftQuery, stQuery, tableName, err
 			}
 
-			// Store found sharding keys in knownKeys
-			if keyFound {
-				knownKeys[shardingKey] = value
-			} else if id != 0 {
-				knownKeys[fmt.Sprintf("%s.id", fullTableName)] = id
-			}
-
+			// Determine the suffix based on the sharding key
 			suffix, err = getSuffix(value, id, keyFound, r)
 			if err != nil {
+				log.Printf("Error determining suffix for table '%s': %v\n", originalTableName, err)
 				return ftQuery, stQuery, tableName, err
 			}
 
@@ -604,6 +601,47 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	}
 
 	return
+}
+
+// extractShardingKeyFromConditions extracts the sharding key for a specific table based on its conditions
+func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditions []*pg_query.Node, args []interface{}, aliasMap map[string]string, currentTable string) (value interface{}, id int64, keyFound bool, err error) {
+	// Initialize a separate knownKeys map for the current table
+	knownKeys := make(map[string]interface{})
+
+	// Iterate through each condition to find the sharding key
+	for _, condition := range conditions {
+		keyFound, value, err = traverseConditionForKey(shardingKey, condition, args, knownKeys, aliasMap)
+		if keyFound || err != nil {
+			break
+		}
+	}
+
+	// If sharding key is not found, attempt to find 'id' for primary key sharding
+	if !keyFound {
+		var idFound bool
+		var idValue interface{}
+		for _, condition := range conditions {
+			log.Println("Traversing condition for 'id'")
+			idFound, idValue, err = traverseConditionForKey("id", condition, args, knownKeys, aliasMap)
+			if idFound || err != nil {
+				break
+			}
+		}
+		if idFound {
+			idInt64, err := toInt64(idValue)
+			if err != nil {
+				err = ErrInvalidID
+				return nil, 0, false, err
+			}
+			id = idInt64
+		} else {
+			// Neither sharding key nor 'id' found; return error
+			err = ErrMissingShardingKey
+			return nil, 0, false, err
+		}
+	}
+
+	return value, id, keyFound, err
 }
 
 func collectJoinConditions(selectStmt *pg_query.SelectStmt) []*pg_query.Node {
@@ -642,7 +680,6 @@ func collectConditionsFromSelect(selectStmt *pg_query.SelectStmt) []*pg_query.No
 }
 
 // assignIDToInsert generates a new ID and assigns it to the insert statement's VALUES list
-// assignIDToInsert generates a new ID and assigns it to the insert statement's VALUES list
 func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, args *[]interface{}) error {
 	// Check if 'id' column is present
 	hasID := false
@@ -658,6 +695,13 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 			idIndex = i
 			break
 		}
+	}
+
+	// Extract shard index from table name
+	shardedTableName := insertStmt.Relation.Relname
+	shardIndex, err := extractShardIndex(shardedTableName, r)
+	if err != nil {
+		return err
 	}
 
 	if hasID {
@@ -677,11 +721,6 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 		if len(valuesSelect.ValuesLists) == 0 {
 			return fmt.Errorf("insert statement has no VALUES list")
 		}
-
-		// Find current max parameter number
-		maxParamNumber := getMaxParamNumber(&pg_query.Node{Node: &pg_query.Node_InsertStmt{InsertStmt: insertStmt}})
-
-		log.Printf("Max param number before assigning id: %d\n", maxParamNumber)
 
 		// Iterate through each VALUES list to assign unique 'id's
 		for idx, valuesList := range valuesSelect.ValuesLists {
@@ -711,10 +750,21 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 			log.Printf("Current 'id' value in VALUES list %d: %d\n", idx, idInt64)
 
 			if idInt64 == 0 {
-				generatedID := r.PrimaryKeyGeneratorFn(int64(idx)) // Generate unique ID for each list
+				// Generate a new ID if 'id' is zero
+				if r.PrimaryKeyGeneratorFn == nil {
+					log.Println("No PrimaryKeyGeneratorFn; cannot generate IDs.")
+					continue
+				}
+
+				generatedID := r.PrimaryKeyGeneratorFn(int64(shardIndex))
+				if generatedID == 0 {
+					log.Printf("Generated ID is 0; skipping 'id' assignment in VALUES list %d.\n", idx)
+					continue
+				}
+
 				log.Printf("Generated ID for VALUES list %d: %d\n", idx, generatedID)
 
-				// Assign the generated ID as a literal value instead of a parameter
+				// Assign the generated ID as an integer literal value
 				listNode.List.Items[idIndex] = &pg_query.Node{
 					Node: &pg_query.Node_AConst{
 						AConst: &pg_query.A_Const{
@@ -728,91 +778,80 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 				log.Printf("'id' is already set to %d in VALUES list %d; no action taken.\n", idInt64, idx)
 			}
 		}
+	} else {
+		// 'id' is not present in insert columns; consider adding it
+		if r.PrimaryKeyGeneratorFn == nil {
+			log.Println("No PrimaryKeyGeneratorFn; not generating IDs.")
+			return nil
+		}
+
+		// Generate the 'id'
+		generatedID := r.PrimaryKeyGeneratorFn(int64(shardIndex))
+		if generatedID == 0 {
+			log.Println("Generated ID is 0; not adding 'id' column.")
+			return nil
+		}
+
+		// Proceed to add 'id' column and value
+		log.Println("'id' column not present in insert columns; adding it.")
+		insertStmt.Cols = append(insertStmt.Cols, &pg_query.Node{
+			Node: &pg_query.Node_ResTarget{
+				ResTarget: &pg_query.ResTarget{
+					Name: "id",
+				},
+			},
+		})
+
+		// Iterate through each VALUES list to assign unique 'id's
+		if insertStmt.SelectStmt == nil {
+			return fmt.Errorf("insert statement has no SelectStmt")
+		}
+
+		selectNode, ok := insertStmt.SelectStmt.Node.(*pg_query.Node_SelectStmt)
+		if !ok {
+			return fmt.Errorf("insert statement SelectStmt is not of type SelectStmt")
+		}
+
+		valuesSelect := selectNode.SelectStmt
+		if len(valuesSelect.ValuesLists) == 0 {
+			return fmt.Errorf("insert statement has no VALUES list")
+		}
+
+		for _, valuesList := range valuesSelect.ValuesLists {
+			listNode, ok := valuesList.Node.(*pg_query.Node_List)
+			if !ok {
+				return fmt.Errorf("unsupported values list type when assigning id")
+			}
+
+			// Assign the generated ID as an integer literal value
+			listNode.List.Items = append(listNode.List.Items, &pg_query.Node{
+				Node: &pg_query.Node_AConst{
+					AConst: &pg_query.A_Const{
+						Val: &pg_query.A_Const_Ival{
+							Ival: &pg_query.Integer{Ival: int32(generatedID)},
+						},
+					},
+				},
+			})
+		}
 	}
-	// Removed the 'else' block to prevent adding 'id' when it's absent
 
 	return nil
 }
 
-func getMaxParamNumber(node *pg_query.Node) int {
-	maxParamNumber := 0
-
-	var traverse func(n *pg_query.Node)
-	traverse = func(n *pg_query.Node) {
-		if n == nil {
-			return
-		}
-		switch v := n.Node.(type) {
-		case *pg_query.Node_ParamRef:
-			if int(v.ParamRef.Number) > maxParamNumber {
-				maxParamNumber = int(v.ParamRef.Number)
-			}
-		case *pg_query.Node_SelectStmt:
-			traverse(v.SelectStmt.WhereClause)
-			for _, vl := range v.SelectStmt.ValuesLists {
-				traverse(vl)
-			}
-			for _, c := range v.SelectStmt.FromClause {
-				traverse(c)
-			}
-			for _, sort := range v.SelectStmt.SortClause {
-				traverse(sort)
-			}
-			traverse(v.SelectStmt.HavingClause)
-			for _, group := range v.SelectStmt.GroupClause {
-				traverse(group)
-			}
-		case *pg_query.Node_InsertStmt:
-			traverse(v.InsertStmt.SelectStmt)
-			for _, col := range v.InsertStmt.Cols {
-				traverse(col)
-			}
-		case *pg_query.Node_List:
-			for _, item := range v.List.Items {
-				traverse(item)
-			}
-		case *pg_query.Node_ResTarget:
-			traverse(v.ResTarget.Val)
-		case *pg_query.Node_AExpr:
-			traverse(v.AExpr.Lexpr)
-			traverse(v.AExpr.Rexpr)
-		case *pg_query.Node_BoolExpr:
-			for _, arg := range v.BoolExpr.Args {
-				traverse(arg)
-			}
-		case *pg_query.Node_ColumnRef:
-			// No action needed
-		default:
-			// Traverse other node types via reflection
-			val := reflect.ValueOf(v)
-			if val.Kind() == reflect.Ptr && !val.IsNil() {
-				val = val.Elem()
-			}
-			if val.Kind() != reflect.Struct {
-				return
-			}
-			for i := 0; i < val.NumField(); i++ {
-				field := val.Field(i)
-				if !field.IsValid() {
-					continue
-				}
-				if field.Kind() == reflect.Ptr {
-					if nodeField, ok := field.Interface().(*pg_query.Node); ok {
-						traverse(nodeField)
-					}
-				} else if field.Kind() == reflect.Slice {
-					for j := 0; j < field.Len(); j++ {
-						if nodeField, ok := field.Index(j).Interface().(*pg_query.Node); ok {
-							traverse(nodeField)
-						}
-					}
-				}
-			}
-		}
+// Helper function to extract shard index from the sharded table name
+func extractShardIndex(tableName string, r Config) (int64, error) {
+	// Assuming tableName has suffix like "_0", "_1", etc.
+	parts := strings.Split(tableName, "_")
+	if len(parts) < 2 {
+		return 0, fmt.Errorf("table name '%s' does not have a suffix", tableName)
 	}
-
-	traverse(node)
-	return maxParamNumber
+	suffix := parts[len(parts)-1]
+	shardIndex, err := strconv.Atoi(suffix)
+	if err != nil {
+		return 0, fmt.Errorf("invalid shard index in table name '%s': %v", tableName, err)
+	}
+	return int64(shardIndex), nil
 }
 
 func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_query.InsertStmt, valuesList *pg_query.Node, args ...interface{}) (value interface{}, id int64, keyFound bool, err error) {
@@ -1132,43 +1171,6 @@ func extractValueFromAConst(aConst *pg_query.A_Const) (interface{}, error) {
 		return nil, fmt.Errorf("unsupported constant type: %T", val)
 	}
 	return nil, fmt.Errorf("value is nil in A_Const")
-}
-
-func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditions []*pg_query.Node, args []interface{}, knownKeys map[string]interface{}, aliasMap map[string]string) (value interface{}, id int64, keyFound bool, err error) {
-	var idFound bool
-	var idValue interface{}
-
-	for _, condition := range conditions {
-		keyFound, value, err = traverseConditionForKey(shardingKey, condition, args, knownKeys, aliasMap)
-		if keyFound || err != nil {
-			break
-		}
-	}
-
-	// If sharding key is not found, attempt to find 'id'
-	if !keyFound {
-		for _, condition := range conditions {
-			fmt.Println("Traversing condition for 'id'")
-			idFound, idValue, err = traverseConditionForKey("id", condition, args, knownKeys, aliasMap)
-			if idFound || err != nil {
-				break
-			}
-		}
-		if idFound {
-			idInt64, err := toInt64(idValue)
-			if err != nil {
-				err = ErrInvalidID
-				return nil, 0, false, err
-			}
-			id = idInt64
-		} else {
-			// Neither sharding key nor 'id' found; return error
-			err = ErrMissingShardingKey
-			return nil, 0, false, err
-		}
-	}
-
-	return value, id, keyFound, err
 }
 
 func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []interface{}, knownKeys map[string]interface{}, aliasMap map[string]string) (keyFound bool, value interface{}, err error) {
