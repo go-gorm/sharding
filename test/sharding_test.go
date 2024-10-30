@@ -17,7 +17,7 @@ var globalDB *gorm.DB
 
 type Order struct {
 	ID        int64  `gorm:"primaryKey"`
-	OrderId   string `gorm:"sharding:order_id"` // 指明 OrderId 是分片键
+	OrderId   string `gorm:"sharding:order_id"` // Specify that OrderId is the sharding key
 	UserID    int64  `gorm:"sharding:user_id"`
 	ProductID int64
 	OrderDate time.Time
@@ -26,7 +26,7 @@ type Order struct {
 
 func InitGormDb() *gorm.DB {
 	log := logger.Default.LogMode(logger.Info)
-	// 连接到 MySQL 数据库
+	// Connect to MySQL database
 	dsn := "user:password@tcp(ip:port)/sharding?charset=utf8mb4&parseTime=True&loc=Local"
 	db, err := gorm.Open(mysql.New(mysql.Config{
 		DSN: dsn,
@@ -40,7 +40,7 @@ func InitGormDb() *gorm.DB {
 	return db
 }
 
-// orders 表的分表键为order_year，根据order_year分表
+// The sharding key of the orders table is order_year, sharding based on order_year
 func customShardingAlgorithmWithOrderYear(value any) (suffix string, err error) {
 	if year, ok := value.(int); ok {
 		return fmt.Sprintf("_%d", year), nil
@@ -48,7 +48,7 @@ func customShardingAlgorithmWithOrderYear(value any) (suffix string, err error) 
 	return "", fmt.Errorf("invalid order_date")
 }
 
-// orders 表的分表键为user_id，根据user_id分表
+// The sharding key of the orders table is user_id, sharding based on user_id
 func customShardingAlgorithmWithUserId(value any) (suffix string, err error) {
 	if userId, ok := value.(int64); ok {
 		return fmt.Sprintf("_%d", userId%4), nil
@@ -56,10 +56,10 @@ func customShardingAlgorithmWithUserId(value any) (suffix string, err error) {
 	return "", fmt.Errorf("invalid user_id")
 }
 
-// orders 表的分表键为user_id，根据order_id分表
+// The sharding key of the orders table is order_id, sharding based on order_id
 func customShardingAlgorithmWithOrderId(value any) (suffix string, err error) {
 	if orderId, ok := value.(string); ok {
-		// 截取字符串，截取前8位，获取年份
+		// Extract the first 8 characters of the string to get the year
 		orderId = orderId[0:8]
 		orderDate, err := time.Parse("20060102", orderId)
 		if err != nil {
@@ -71,10 +71,10 @@ func customShardingAlgorithmWithOrderId(value any) (suffix string, err error) {
 	return "", fmt.Errorf("invalid order_date")
 }
 
-// customePrimaryKeyGeneratorFn 自定义主键生成函数
+// customePrimaryKeyGeneratorFn Custom primary key generation function
 func customePrimaryKeyGeneratorFn(tableIdx int64) int64 {
 	var id int64
-	seqTableName := "gorm_sharding_orders_id_seq" // 序列表名
+	seqTableName := "gorm_sharding_orders_id_seq" // Sequence table name
 	db := globalDB
 	err := db.Exec("UPDATE `" + seqTableName + "` SET id = id+1").Error
 	if err != nil {
@@ -87,42 +87,42 @@ func customePrimaryKeyGeneratorFn(tableIdx int64) int64 {
 	return id
 }
 func Test_Gorm_CreateTable(t *testing.T) {
-	// 初始化 Gorm DB
+	// Initialize Gorm DB
 	db := InitGormDb()
 
-	// 创建gorm_sharding_orders_id_seq表
+	// Create gorm_sharding_orders_id_seq table
 	err := db.Exec(`CREATE TABLE IF NOT EXISTS gorm_sharding_orders_id_seq (
 	id BIGINT PRIMARY KEY NOT NULL DEFAULT 1
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`).Error
 	if err != nil {
 		panic("failed to create table")
 	}
-	// 插入一条记录
+	// Insert a record
 	err = db.Exec(`INSERT INTO gorm_sharding_orders_id_seq (id) VALUES (1)`).Error
 	if err != nil {
 		panic("failed to insert data")
 	}
 
-	// 预先创建 4 个分片表。
+	// Pre-create 4 shard tables.
 	// orders_0, orders_1, orders_2, orders_3
-	// 根据 user_id 分片键策略，每个分片表存储 user_id 取模 4 余数为 0, 1, 2, 3 的订单数据。
+	// According to the user_id sharding key strategy, each shard table stores order data with user_id modulo 4 remainder of 0, 1, 2, 3.
 	for i := 0; i < 4; i++ {
 		table := fmt.Sprintf("orders_%d", i)
-		// 删除已存在的表（如果存在）
+		// Drop existing table (if exists)
 		db.Exec(`DROP TABLE IF EXISTS ` + table)
-		// 创建新的分片表
+		// Create new shard table
 		db.Exec(`CREATE TABLE ` + table + ` (
 			id BIGINT PRIMARY KEY,
-		    order_id VARCHAR(50),
-		    user_id INT,
-		    product_id INT,
-		    order_date DATETIME
+						order_id VARCHAR(50),
+						user_id INT,
+						product_id INT,
+						order_date DATETIME
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 	}
 
-	// 创建 Order 表
-	// 根据 order_id 分片键策略，每个分片表存储不同年份的订单数据。
-	// 也可根据order_year分片策略路由到不同的分片表。
+	// Create Order table
+	// According to the order_id sharding key strategy, each shard table stores order data of different years.
+	// It can also be routed to different shard tables according to the order_year sharding strategy.
 	// orders_2024, orders_2025
 	err = db.Exec(`CREATE TABLE IF NOT EXISTS orders_2024 (
 		id BIGINT PRIMARY KEY,
@@ -149,25 +149,25 @@ func Test_Gorm_CreateTable(t *testing.T) {
 }
 
 func Test_Gorm_Sharding_WithKeys(t *testing.T) {
-	// 初始化 Gorm DB
+	// Initialize Gorm DB
 	db := InitGormDb()
 
-	// 分表策略配置
+	// Sharding strategy configuration
 	configWithOrderYear := sharding.Config{
 		ShardingKey:           "order_year",
-		ShardingAlgorithm:     customShardingAlgorithmWithOrderYear, // 使用自定义的分片算法
-		PrimaryKeyGenerator:   sharding.PKCustom,                    // 使用自定义的主键生成函数
-		PrimaryKeyGeneratorFn: customePrimaryKeyGeneratorFn,         // 自定义主键生成函数
+		ShardingAlgorithm:     customShardingAlgorithmWithOrderYear, // Use custom sharding algorithm
+		PrimaryKeyGenerator:   sharding.PKCustom,                    // Use custom primary key generation function
+		PrimaryKeyGeneratorFn: customePrimaryKeyGeneratorFn,         // Custom primary key generation function
 	}
 	configWithUserId := sharding.Config{
 		ShardingKey:         "user_id",
 		NumberOfShards:      4,
-		ShardingAlgorithm:   customShardingAlgorithmWithUserId, // 使用自定义的分片算法
-		PrimaryKeyGenerator: sharding.PKSnowflake,              // 使用 Snowflake 算法生成主键
+		ShardingAlgorithm:   customShardingAlgorithmWithUserId, // Use custom sharding algorithm
+		PrimaryKeyGenerator: sharding.PKSnowflake,              // Use Snowflake algorithm to generate primary key
 	}
 	configWithOrderId := sharding.Config{
 		ShardingKey:           "order_id",
-		ShardingAlgorithm:     customShardingAlgorithmWithOrderId, // 使用自定义的分片算法
+		ShardingAlgorithm:     customShardingAlgorithmWithOrderId, // Use custom sharding algorithm
 		PrimaryKeyGenerator:   sharding.PKCustom,
 		PrimaryKeyGeneratorFn: customePrimaryKeyGeneratorFn,
 	}
@@ -176,19 +176,19 @@ func Test_Gorm_Sharding_WithKeys(t *testing.T) {
 	mapConfig["orders_user_id"] = configWithUserId
 	mapConfig["orders_order_id"] = configWithOrderId
 
-	// 配置 Gorm Sharding 中间件，注册分表策略配置
-	middleware := sharding.RegisterWithKeys(mapConfig) // 逻辑表名为 "orders"
+	// Configure Gorm Sharding middleware, register sharding strategy configuration
+	middleware := sharding.RegisterWithKeys(mapConfig) // Logical table name is "orders"
 	db.Use(middleware)
 
-	// 根据order_year分片键策略，插入和查询示例
+	// Insert and query examples based on order_year sharding key strategy
 	InsertOrderByOrderYearKey(db)
 	FindByOrderYearKey(db, 2024)
 
-	// 根据user_id分片键策略，插入和查询示例
+	// Insert and query examples based on user_id sharding key strategy
 	InsertOrderByUserId(db)
 	FindByUserIDKey(db, int64(100))
 
-	// 根据order_id分片键策略，插入、查询、更新和删除示例
+	// Insert, query, update, and delete examples based on order_id sharding key strategy
 	InsertOrderByOrderIdKey(db)
 	FindOrderByOrderIdKey(db, "20240101ORDER0002")
 	UpdateByOrderIdKey(db, "20240101ORDER0002")
@@ -200,12 +200,12 @@ func InsertOrderByOrderYearKey(db *gorm.DB) error {
 	defer cancel()
 	ctx = context.WithValue(ctx, "sharding_key", "order_year")
 	db = db.WithContext(ctx)
-	// 随机2024年或者2025年
+	// Randomly 2024 or 2025
 	orderYear := rand.Intn(2) + 2024
-	// 随机userId
+	// Random userId
 	userId := rand.Intn(100)
 	orderId := fmt.Sprintf("%d0101ORDER%04v", orderYear, rand.Int31n(10000))
-	// 示例：插入订单数据
+	// Example: Insert order data
 	order := Order{
 		OrderId:   orderId,
 		UserID:    int64(userId),
@@ -220,7 +220,7 @@ func InsertOrderByOrderYearKey(db *gorm.DB) error {
 	return err
 }
 func FindByOrderYearKey(db *gorm.DB, orderYear int) ([]Order, error) {
-	// 查询示例
+	// Query example
 	var orders []Order
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -240,12 +240,12 @@ func InsertOrderByOrderIdKey(db *gorm.DB) error {
 	defer cancel()
 	ctx = context.WithValue(ctx, "sharding_key", "order_id")
 	db = db.WithContext(ctx)
-	// 随机2024年或者2025年
+	// Randomly 2024 or 2025
 	orderYear := rand.Intn(2) + 2024
-	// 随机userId
+	// Random userId
 	userId := rand.Intn(100)
 	orderId := fmt.Sprintf("%d0101ORDER%04v", orderYear, rand.Int31n(10000))
-	// 示例：插入订单数据
+	// Example: Insert order data
 	order := Order{
 		OrderId:   orderId,
 		UserID:    int64(userId),
@@ -288,7 +288,7 @@ func DeleteByOrderIdKey(db *gorm.DB, orderId string) error {
 }
 func FindOrderByOrderIdKey(db *gorm.DB, orderId string) ([]Order, error) {
 	var orders []Order
-	// 查询示例
+	// Query example
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx = context.WithValue(ctx, "sharding_key", "order_id")
@@ -304,7 +304,7 @@ func FindOrderByOrderIdKey(db *gorm.DB, orderId string) ([]Order, error) {
 
 type OrderByUserId struct {
 	ID        int64  `gorm:"primaryKey"`
-	OrderId   string `gorm:"sharding:order_id"` // 指明 OrderId 是分片键
+	OrderId   string `gorm:"sharding:order_id"` // Specify that OrderId is the sharding key
 	UserID    int64  `gorm:"sharding:user_id"`
 	ProductID int64
 	OrderDate time.Time
@@ -315,12 +315,12 @@ func InsertOrderByUserId(db *gorm.DB) error {
 	defer cancel()
 	ctx = context.WithValue(ctx, "sharding_key", "user_id")
 	db = db.WithContext(ctx)
-	// 随机2024年或者2025年
+	// Randomly 2024 or 2025
 	orderYear := rand.Intn(2) + 2024
-	// 随机userId
+	// Random userId
 	userId := rand.Intn(100)
 	orderId := fmt.Sprintf("%d0101ORDER%04v", orderYear, rand.Int31n(10000))
-	// 示例：插入订单数据
+	// Example: Insert order data
 	order := OrderByUserId{
 		OrderId:   orderId,
 		UserID:    int64(userId),
@@ -336,7 +336,7 @@ func InsertOrderByUserId(db *gorm.DB) error {
 
 func FindByUserIDKey(db *gorm.DB, userID int64) ([]Order, error) {
 	var orders []Order
-	// 查询示例
+	// Query example
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx = context.WithValue(ctx, "sharding_key", "user_id")
