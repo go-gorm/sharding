@@ -3,7 +3,6 @@ package sharding
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -38,14 +37,17 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 
 	if table != "" {
 		key := table
-		if shardingKey, ok := ctx.Value("sharding_key").(string); ok {
-			key = fmt.Sprintf("%s_%v", table, shardingKey)
+		key, err = pool.sharding.getConfigKey(ctx, table)
+		if err != nil {
+			return nil, err
 		}
 		if r, ok := pool.sharding.configs[key]; ok {
 			if r.DoubleWrite {
 				pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
 					result, _ := pool.ConnPool.ExecContext(ctx, ftQuery, args...)
-					rowsAffected, _ = result.RowsAffected()
+					if result != nil {
+						rowsAffected, _ = result.RowsAffected()
+					}
 					return pool.sharding.Explain(ftQuery, args...), rowsAffected
 				}, pool.sharding.Error)
 			}
@@ -55,7 +57,9 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	var result sql.Result
 	result, err = pool.ConnPool.ExecContext(ctx, stQuery, args...)
 	pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
-		rowsAffected, _ = result.RowsAffected()
+		if result != nil {
+			rowsAffected, _ = result.RowsAffected()
+		}
 		return pool.sharding.Explain(stQuery, args...), rowsAffected
 	}, pool.sharding.Error)
 

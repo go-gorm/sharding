@@ -16,14 +16,19 @@ import (
 )
 
 var (
-	ErrMissingShardingKey = errors.New("sharding key or id required, and use operator =")
-	ErrInvalidID          = errors.New("invalid id format")
-	ErrInsertDiffSuffix   = errors.New("can not insert different suffix table in one query ")
+	ErrMissingShardingKey           = errors.New("sharding key or id required, and use operator =")
+	ErrInvalidID                    = errors.New("invalid id format")
+	ErrInsertDiffSuffix             = errors.New("can not insert different suffix table in one query ")
+	ErrShardingKeyNotExistInContext = errors.New("the value passed in the context is not the sharding key")
+	ErrMissingTableName             = errors.New("table name is required")
 )
 
 var (
 	ShardingIgnoreStoreKey = "sharding_ignore"
 )
+
+// ContextKeyForShardingKey is the context key for sharding key.
+const ContextKeyForShardingKey = "sharding_key"
 
 type Sharding struct {
 	*gorm.DB
@@ -46,6 +51,10 @@ type Config struct {
 	// ShardingKey specifies the table column you want to used for sharding the table rows.
 	// For example, for a product order table, you may want to split the rows by `user_id`.
 	ShardingKey string
+
+	// logical table name.Suport multiple table names with same sharding key.
+	// For example, for user and order table, you may want to shard by `user_id`.
+	TableNames []string
 
 	// NumberOfShards specifies how many tables you want to sharding.
 	NumberOfShards uint
@@ -112,10 +121,53 @@ func Register(config Config, tables ...any) *Sharding {
 }
 
 // enables sharding for a single table with flexible support for multiple partition keys.
-func RegisterWithKeys(configs map[string]Config) *Sharding {
-	return &Sharding{
-		configs: configs,
+func RegisterWithKeys(configs []Config) (*Sharding, error) {
+	mapConfig := make(map[string]Config, len(configs))
+	for _, config := range configs {
+		for _, tableName := range config.TableNames {
+			configKey, err := generateConfigsKey(tableName, config.ShardingKey)
+			if err != nil {
+				return nil, err
+			}
+			mapConfig[configKey] = config
+		}
 	}
+	return &Sharding{
+		configs: mapConfig,
+	}, nil
+}
+
+// generates the key for the sharding config.
+func generateConfigsKey(tableName, shardingKey string) (string, error) {
+	// Table name cannot be empty
+	if tableName == "" {
+		return "", ErrMissingTableName
+	}
+	if shardingKey == "" {
+		return "", ErrMissingShardingKey
+	}
+	return fmt.Sprintf("%s_%s", tableName, shardingKey), nil
+}
+
+// get the configs key for using it to get the sharding config.
+func (s *Sharding) getConfigKey(ctx context.Context, tableName string) (string, error) {
+	configKey := tableName
+	if shardingKey, ok := ctx.Value(ContextKeyForShardingKey).(string); ok {
+		// If sharding key is set in context, use it to get the sharding config.
+		configKey = fmt.Sprintf("%s_%s", tableName, shardingKey)
+	} else {
+		// If sharding key is not set in context, use the table name as the key.
+		return configKey, nil
+	}
+
+	// check if the sharding key exists in the configs.
+	_, exis := s.configs[configKey]
+	if !exis {
+		return "", ErrShardingKeyNotExistInContext
+	}
+
+	// If sharding key is not set in context, use the table name as the key.
+	return configKey, nil
 }
 
 func (s *Sharding) compile() error {
@@ -353,9 +405,9 @@ func (s *Sharding) resolve(ctx context.Context, query string, args ...any) (ftQu
 
 	tableName = table.Name.Name
 	key := tableName
-	// If sharding key is set in context, use it to get the sharding config.
-	if shardingKey, ok := ctx.Value("sharding_key").(string); ok {
-		key = fmt.Sprintf("%s_%v", tableName, shardingKey)
+	key, err = s.getConfigKey(ctx, tableName)
+	if err != nil {
+		return
 	}
 	r, ok := s.configs[key]
 	if !ok {
