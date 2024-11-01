@@ -3,7 +3,6 @@ package sharding
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -28,7 +27,6 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	var (
 		curTime = time.Now()
 	)
-	fmt.Printf("ExecContext args: %v\n", args)
 
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
 	if err != nil {
@@ -64,7 +62,6 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...any
 	var (
 		curTime = time.Now()
 	)
-	fmt.Printf("QueryContext args: %v\n", args)
 
 	_, stQuery, _, err := pool.sharding.resolve(query, args...)
 	if err != nil {

@@ -1,7 +1,6 @@
 package sharding
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/bwmarrin/snowflake"
@@ -467,12 +466,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			var consistentSuffix string
 			suffixes := make(map[string]bool)
 
-			marshal, err := json.Marshal(insertStmt)
-			if err != nil {
-				return "", "", "", err
-			}
-			fmt.Println("marshal", string(marshal))
-
 			if insertStmt.SelectStmt != nil {
 				nestedSelect, ok := insertStmt.SelectStmt.Node.(*pg_query.Node_SelectStmt)
 				if !ok {
@@ -485,7 +478,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 				}
 				// Iterate through each values list to extract suffixes
 				for _, valuesList := range valuesSelect.ValuesLists {
-					fmt.Println("selectStmt.valuesList", valuesList)
 					value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
 					if err != nil {
 						return ftQuery, stQuery, tableName, err
@@ -514,7 +506,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 				// Iterate through each values list to extract suffixes
 				for _, valuesList := range insertStmt.ReturningList {
-					fmt.Println("valuesList", valuesList)
 					value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
 					if err != nil {
 						return ftQuery, stQuery, tableName, err
@@ -852,7 +843,6 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 	if len(list.Items) != len(insertStmt.Cols) {
 		return nil, 0, false, errors.New("values list has fewer items than columns")
 	}
-	fmt.Println("ShardingKey :", r.ShardingKey)
 	// Iterate through columns to find the sharding key and id
 	for i, colItem := range insertStmt.Cols {
 		resTarget, ok := colItem.Node.(*pg_query.Node_ResTarget)
