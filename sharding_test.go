@@ -857,7 +857,7 @@ func TestJoinShardedTablesDifferentJoinTypes(t *testing.T) {
 	orderDetailTableSuffix := fmt.Sprintf("_%01d", orderDetailShardIndex)
 
 	// List of join types to test
-	joinTypes := []string{"INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}
+	joinTypes := []string{"JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}
 
 	for _, joinType := range joinTypes {
 		// Expected query with sharded table names and join type

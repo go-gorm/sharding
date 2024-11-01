@@ -787,10 +787,10 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 
 		// Generate the 'id'
 		generatedID := r.PrimaryKeyGeneratorFn(int64(shardIndex))
-		if generatedID == 0 {
-			log.Println("Generated ID is 0; not adding 'id' column.")
-			return nil
-		}
+		//if generatedID == 0 {
+		//	log.Println("Generated ID is 0; not adding 'id' column.")
+		//	return nil
+		//}
 
 		// Proceed to add 'id' column and value
 		log.Println("'id' column not present in insert columns; adding it.")
