@@ -705,13 +705,11 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 	}
 
 	if hasID {
-		log.Println("Handling existing 'id' column.")
-		// Access the SelectStmt to get the VALUES lists
+		// Handle existing 'id' column
 		if insertStmt.SelectStmt == nil {
 			return fmt.Errorf("insert statement has no SelectStmt")
 		}
 
-		// The SelectStmt should contain the VALUES lists
 		selectNode, ok := insertStmt.SelectStmt.Node.(*pg_query.Node_SelectStmt)
 		if !ok {
 			return fmt.Errorf("insert statement SelectStmt is not of type SelectStmt")
@@ -722,7 +720,7 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 			return fmt.Errorf("insert statement has no VALUES list")
 		}
 
-		// Iterate through each VALUES list to assign unique 'id's
+		// Iterate through each VALUES list to assign 'id's
 		for idx, valuesList := range valuesSelect.ValuesLists {
 			listNode, ok := valuesList.Node.(*pg_query.Node_List)
 			if !ok {
@@ -747,92 +745,75 @@ func (s *Sharding) assignIDToInsert(insertStmt *pg_query.InsertStmt, r Config, a
 				return err
 			}
 
-			log.Printf("Current 'id' value in VALUES list %d: %d\n", idx, idInt64)
-
 			if idInt64 == 0 {
 				// Generate a new ID if 'id' is zero
-				if r.PrimaryKeyGeneratorFn == nil {
-					log.Println("No PrimaryKeyGeneratorFn; cannot generate IDs.")
-					continue
-				}
-
-				generatedID := r.PrimaryKeyGeneratorFn(int64(shardIndex))
-				if generatedID == 0 {
-					log.Printf("Generated ID is 0; skipping 'id' assignment in VALUES list %d.\n", idx)
-					continue
-				}
-
-				log.Printf("Generated ID for VALUES list %d: %d\n", idx, generatedID)
-
-				// Assign the generated ID as an integer literal value
-				listNode.List.Items[idIndex] = &pg_query.Node{
-					Node: &pg_query.Node_AConst{
-						AConst: &pg_query.A_Const{
-							Val: &pg_query.A_Const_Ival{
-								Ival: &pg_query.Integer{Ival: int32(generatedID)},
+				if r.PrimaryKeyGeneratorFn != nil {
+					generatedID := r.PrimaryKeyGeneratorFn(int64(shardIndex))
+					if generatedID != 0 {
+						// Replace the 'id' value with the generated ID
+						listNode.List.Items[idIndex] = &pg_query.Node{
+							Node: &pg_query.Node_AConst{
+								AConst: &pg_query.A_Const{
+									Val: &pg_query.A_Const_Ival{
+										Ival: &pg_query.Integer{Ival: int32(generatedID)},
+									},
+								},
 							},
-						},
-					},
+						}
+					}
+					// Else, leave 'id' as zero
 				}
-			} else {
-				log.Printf("'id' is already set to %d in VALUES list %d; no action taken.\n", idInt64, idx)
 			}
+			// Else, leave 'id' as is
 		}
 	} else {
-		// 'id' is not present in insert columns; consider adding it
-		if r.PrimaryKeyGeneratorFn == nil {
-			log.Println("No PrimaryKeyGeneratorFn; not generating IDs.")
-			return nil
-		}
-
-		// Generate the 'id'
-		generatedID := r.PrimaryKeyGeneratorFn(int64(shardIndex))
-		//if generatedID == 0 {
-		//	log.Println("Generated ID is 0; not adding 'id' column.")
-		//	return nil
-		//}
-
-		// Proceed to add 'id' column and value
-		log.Println("'id' column not present in insert columns; adding it.")
-		insertStmt.Cols = append(insertStmt.Cols, &pg_query.Node{
-			Node: &pg_query.Node_ResTarget{
-				ResTarget: &pg_query.ResTarget{
-					Name: "id",
-				},
-			},
-		})
-
-		// Iterate through each VALUES list to assign unique 'id's
-		if insertStmt.SelectStmt == nil {
-			return fmt.Errorf("insert statement has no SelectStmt")
-		}
-
-		selectNode, ok := insertStmt.SelectStmt.Node.(*pg_query.Node_SelectStmt)
-		if !ok {
-			return fmt.Errorf("insert statement SelectStmt is not of type SelectStmt")
-		}
-
-		valuesSelect := selectNode.SelectStmt
-		if len(valuesSelect.ValuesLists) == 0 {
-			return fmt.Errorf("insert statement has no VALUES list")
-		}
-
-		for _, valuesList := range valuesSelect.ValuesLists {
-			listNode, ok := valuesList.Node.(*pg_query.Node_List)
-			if !ok {
-				return fmt.Errorf("unsupported values list type when assigning id")
-			}
-
-			// Assign the generated ID as an integer literal value
-			listNode.List.Items = append(listNode.List.Items, &pg_query.Node{
-				Node: &pg_query.Node_AConst{
-					AConst: &pg_query.A_Const{
-						Val: &pg_query.A_Const_Ival{
-							Ival: &pg_query.Integer{Ival: int32(generatedID)},
+		// 'id' is not present in insert columns
+		if r.PrimaryKeyGeneratorFn != nil {
+			generatedID := r.PrimaryKeyGeneratorFn(int64(shardIndex))
+			if generatedID != 0 {
+				// Proceed to add 'id' column and value
+				log.Println("'id' column not present in insert columns; adding it.")
+				insertStmt.Cols = append(insertStmt.Cols, &pg_query.Node{
+					Node: &pg_query.Node_ResTarget{
+						ResTarget: &pg_query.ResTarget{
+							Name: "id",
 						},
 					},
-				},
-			})
+				})
+
+				if insertStmt.SelectStmt == nil {
+					return fmt.Errorf("insert statement has no SelectStmt")
+				}
+
+				selectNode, ok := insertStmt.SelectStmt.Node.(*pg_query.Node_SelectStmt)
+				if !ok {
+					return fmt.Errorf("insert statement SelectStmt is not of type SelectStmt")
+				}
+
+				valuesSelect := selectNode.SelectStmt
+				if len(valuesSelect.ValuesLists) == 0 {
+					return fmt.Errorf("insert statement has no VALUES list")
+				}
+
+				for _, valuesList := range valuesSelect.ValuesLists {
+					listNode, ok := valuesList.Node.(*pg_query.Node_List)
+					if !ok {
+						return fmt.Errorf("unsupported values list type when assigning id")
+					}
+
+					// Append the generated ID to the VALUES list
+					listNode.List.Items = append(listNode.List.Items, &pg_query.Node{
+						Node: &pg_query.Node_AConst{
+							AConst: &pg_query.A_Const{
+								Val: &pg_query.A_Const_Ival{
+									Ival: &pg_query.Integer{Ival: int32(generatedID)},
+								},
+							},
+						},
+					})
+				}
+			}
+			// Else, generatedID == 0, so we skip adding 'id' column
 		}
 	}
 
