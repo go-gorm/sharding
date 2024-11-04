@@ -9,6 +9,7 @@ import (
 	"hash/crc32"
 	"log"
 	"math"
+	"math/big"
 	"reflect"
 	"strconv"
 	"strings"
@@ -909,10 +910,6 @@ func toInt64(value interface{}) (int64, error) {
 		return int64(v), nil
 	case float64:
 		return int64(v), nil
-	case Numeric:
-		return v.ToInt64(), nil
-	case UInt256:
-		return v.ToInt64(), nil
 	case string:
 		i, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -920,6 +917,17 @@ func toInt64(value interface{}) (int64, error) {
 		}
 		return i, nil
 	default:
+		val := reflect.ValueOf(value)
+		if val.Kind() == reflect.Struct {
+			// Try to find a field named "I" that is a *big.Int
+			field := val.FieldByName("I")
+			if field.IsValid() && field.Type() == reflect.TypeOf(&big.Int{}) {
+				bigIntPtr := field.Interface().(*big.Int)
+				if bigIntPtr != nil {
+					return bigIntPtr.Int64(), nil
+				}
+			}
+		}
 		log.Printf("Unsupported type for conversion to int64: %T\n", v)
 		return 0, fmt.Errorf("unsupported type for conversion to int64: %T", v)
 	}
