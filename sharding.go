@@ -621,8 +621,7 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 		if idFound {
 			idInt64, err := toInt64(idValue)
 			if err != nil {
-				err = ErrInvalidID
-				return nil, 0, false, err
+				return nil, 0, false, ErrInvalidID
 			}
 			id = idInt64
 		} else {
@@ -902,6 +901,7 @@ func toInt64(value interface{}) (int64, error) {
 		return int64(v), nil
 	case uint64:
 		if v > math.MaxInt64 {
+			log.Printf("uint64 value %d overflows int64", v)
 			return 0, fmt.Errorf("uint64 value %d overflows int64", v)
 		}
 		return int64(v), nil
@@ -920,6 +920,7 @@ func toInt64(value interface{}) (int64, error) {
 		}
 		return i, nil
 	default:
+		log.Printf("Unsupported type for conversion to int64: %T\n", v)
 		return 0, fmt.Errorf("unsupported type for conversion to int64: %T", v)
 	}
 }
