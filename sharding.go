@@ -913,6 +913,12 @@ func toInt64(value interface{}) (int64, error) {
 		return v.ToInt64(), nil
 	case UInt256:
 		return v.ToInt64(), nil
+	case string:
+		i, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("error converting string to int64: %v", err)
+		}
+		return i, nil
 	default:
 		return 0, fmt.Errorf("unsupported type for conversion to int64: %T", v)
 	}
