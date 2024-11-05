@@ -881,6 +881,21 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 }
 
 func toInt64(value interface{}) (int64, error) {
+
+	if value == nil {
+		return 0, fmt.Errorf("cannot convert nil to int64")
+	}
+
+	// Handle pointer types first
+	valueType := reflect.TypeOf(value)
+	if valueType.Kind() == reflect.Ptr {
+		if reflect.ValueOf(value).IsNil() {
+			return 0, fmt.Errorf("cannot convert nil pointer to int64")
+		}
+		// Dereference the pointer and recursively call toInt64
+		return toInt64(reflect.ValueOf(value).Elem().Interface())
+	}
+
 	switch v := value.(type) {
 	case int:
 		return int64(v), nil
@@ -932,6 +947,7 @@ func toInt64(value interface{}) (int64, error) {
 		return 0, fmt.Errorf("unsupported type for conversion to int64: %T", v)
 	}
 }
+
 func collectTablesFromSelect(selectStmt *pg_query.SelectStmt) []string {
 	var tables []string
 	for _, fromItem := range selectStmt.FromClause {

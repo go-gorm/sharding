@@ -6,6 +6,7 @@ import (
 	tassert "github.com/stretchr/testify/assert"
 	"gorm.io/gorm/logger"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -44,6 +45,13 @@ type OrderDetail struct {
 	OrderID  int64
 	Product  string
 	Quantity int
+}
+
+type Swap struct {
+	GID     *uint64 `gorm:"column:gid;primaryKey"`
+	ID      uint64  `gorm:"not null;index"`
+	EventID uint64  `gorm:"not null;index"`
+	Escrow  bool    `gorm:"not null"`
 }
 
 func dbURL() string {
@@ -1001,6 +1009,125 @@ func TestJoinWithAggregation(t *testing.T) {
 	assert.Equal(t, 2, results[0].TotalQuantity) // 2
 }
 
+func TestInsertWithPreGeneratedGID(t *testing.T) {
+
+	db, err := gorm.Open(postgres.Open(dbURL()), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		t.Fatalf("failed to connect to database: %v", err)
+	}
+
+	// Define the sharding configuration
+	numberOfShards := uint(4)
+	swapConfig := Config{
+		ShardingKey:         "gid", // Changed from ShardingKey
+		NumberOfShards:      numberOfShards,
+		PrimaryKeyGenerator: PKSnowflake,
+		PrimaryKeyGeneratorFn: func(tableIdx int64) int64 {
+			node, _ := snowflake.NewNode(tableIdx)
+			return node.Generate().Int64()
+		},
+		// Corrected field names
+		ShardingAlgorithm: func(columnValue interface{}) (string, error) {
+			// Dereference the value if it's a pointer
+			actualValue := dereferenceValue(columnValue)
+			if actualValue == nil {
+				return "", fmt.Errorf("nil value provided for sharding key")
+			}
+
+			// Convert to int64
+			gid, err := toInt64(actualValue)
+			if err != nil {
+				return "", fmt.Errorf("shardingAlgorithm: %v", err)
+			}
+
+			suffix := fmt.Sprintf("_%d", gid%int64(numberOfShards))
+			return suffix, nil
+		},
+		ShardingAlgorithmByPrimaryKey: func(id int64) string {
+			return fmt.Sprintf("_%d", id%int64(numberOfShards))
+		},
+	}
+
+	// Register the sharding middleware
+	middleware := Register(map[string]Config{
+		"swaps": swapConfig,
+	}, &Swap{})
+	if err := db.Use(middleware); err != nil {
+		t.Fatalf("failed to use sharding middleware: %v", err)
+	}
+
+	// Drop and recreate the swaps table
+	if err := db.Exec("DROP TABLE IF EXISTS swaps").Error; err != nil {
+		t.Fatalf("failed to drop table: %v", err)
+	}
+	if err := db.AutoMigrate(&Swap{}); err != nil {
+		t.Fatalf("failed to migrate schema: %v", err)
+	}
+
+	// Create sharded tables
+	for i := 0; i < int(swapConfig.NumberOfShards); i++ {
+		tableName := fmt.Sprintf("swaps_%d", i)
+		if err := db.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (LIKE swaps INCLUDING ALL)", tableName)).Error; err != nil {
+			t.Fatalf("failed to create sharded table %s: %v", tableName, err)
+		}
+	}
+
+	// Generate GID before insertion
+	node, err := snowflake.NewNode(1)
+	if err != nil {
+		t.Fatalf("failed to create snowflake node: %v", err)
+	}
+	gid := uint64(node.Generate().Int64())
+
+	// Create a Swap instance with the generated GID
+	swap := &Swap{
+		GID:     &gid,
+		ID:      100,
+		EventID: 200,
+		Escrow:  true,
+	}
+
+	// Insert the Swap record
+	err = db.Create(swap).Error
+	if err != nil {
+		t.Errorf("failed to insert swap record: %v", err)
+	} else {
+		t.Logf("swap record inserted successfully with GID: %d", swap.GID)
+	}
+
+	// Verify that the record is inserted into the correct shard
+	expectedShard := gid % uint64(numberOfShards)
+	expectedTable := fmt.Sprintf("swaps_%d", expectedShard)
+
+	var count int64
+	err = db.Table(expectedTable).Where("gid = ?", gid).Count(&count).Error
+	if err != nil {
+		t.Errorf("failed to query swap record in shard: %v", err)
+	} else if count != 1 {
+		t.Errorf("expected 1 record in shard %s, found %d", expectedTable, count)
+	} else {
+		t.Logf("swap record found in correct shard table: %s", expectedTable)
+	}
+}
+
+// Function to safely get value from pointer types
+func dereferenceValue(value interface{}) interface{} {
+	if value == nil {
+		return nil
+	}
+
+	v := reflect.ValueOf(value)
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return nil
+		}
+		return v.Elem().Interface()
+	}
+	return value
+}
+
 func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {
 	t.Helper()
 	normalize := func(query string) string {
@@ -1010,18 +1137,6 @@ func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {
 	}
 	normalizedExpected := normalize(toDialect(expected))
 	normalizedActual := normalize(middleware.LastQuery())
-	assert.Equal(t, normalizedExpected, normalizedActual)
-}
-
-func assertInsertResult(t *testing.T, expected string, tx *gorm.DB, mw *Sharding) {
-	t.Helper()
-	normalize := func(query string) string {
-		// Remove quotes around identifiers
-		re := regexp.MustCompile(`"(\w+)"`)
-		return re.ReplaceAllString(query, `$1`)
-	}
-	normalizedExpected := normalize(toDialect(expected))
-	normalizedActual := normalize(mw.LastQuery())
 	assert.Equal(t, normalizedExpected, normalizedActual)
 }
 
