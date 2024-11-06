@@ -154,10 +154,9 @@ func Test_Gorm_Sharding_WithKeys(t *testing.T) {
 
 	// Configure Gorm Sharding middleware, register sharding strategy configuration
 	// Logical table name is "orders"
-	shardingConfig, err := sharding.RegisterWithKeys([]sharding.Config{
-		{
+	shardingConfig, err := sharding.RegisterWithKeys(map[string]sharding.Config{
+		sharding.GenerateConfigsKey("orders", "order_year"): {
 			ShardingKey: "order_year",
-			TableNames:  []string{"orders"},
 			// Use custom sharding algorithm
 			ShardingAlgorithm: customShardingAlgorithmWithOrderYear,
 			// Use custom primary key generation function
@@ -165,18 +164,16 @@ func Test_Gorm_Sharding_WithKeys(t *testing.T) {
 			// Custom primary key generation function
 			PrimaryKeyGeneratorFn: customePrimaryKeyGeneratorFn,
 		},
-		{
+		sharding.GenerateConfigsKey("orders", "user_id"): {
 			ShardingKey:    "user_id",
-			TableNames:     []string{"orders"},
 			NumberOfShards: 4,
 			// Use custom sharding algorithm
 			ShardingAlgorithm: customShardingAlgorithmWithUserId,
 			// Use Snowflake algorithm to generate primary key
 			PrimaryKeyGenerator: sharding.PKSnowflake,
 		},
-		{
+		sharding.GenerateConfigsKey("orders", "order_id"): {
 			ShardingKey: "order_id",
-			TableNames:  []string{"orders"},
 			// Use custom sharding algorithm
 			ShardingAlgorithm:     customShardingAlgorithmWithOrderId,
 			PrimaryKeyGenerator:   sharding.PKCustom,
@@ -206,7 +203,7 @@ func Test_Gorm_Sharding_WithKeys(t *testing.T) {
 func InsertOrderByOrderYearKey(db *gorm.DB) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx = context.WithValue(ctx, sharding.ContextKeyForShardingKey, "order_year")
+	ctx = context.WithValue(ctx, sharding.ShardingContextKey, "order_year")
 	db = db.WithContext(ctx)
 	// Randomly 2024 or 2025
 	orderYear := rand.Intn(2) + 2024
@@ -232,7 +229,7 @@ func FindByOrderYearKey(db *gorm.DB, orderYear int) ([]Order, error) {
 	var orders []Order
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx = context.WithValue(ctx, sharding.ContextKeyForShardingKey, "order_year")
+	ctx = context.WithValue(ctx, sharding.ShardingContextKey, "order_year")
 	db = db.WithContext(ctx)
 	db = db.Table("orders")
 	err := db.Model(&Order{}).Where("order_year=? and product_id=? and order_id=?", orderYear, 102, "20240101ORDER0002").Find(&orders).Error
@@ -246,7 +243,7 @@ func FindByOrderYearKey(db *gorm.DB, orderYear int) ([]Order, error) {
 func InsertOrderByOrderIdKey(db *gorm.DB) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx = context.WithValue(ctx, sharding.ContextKeyForShardingKey, "order_id")
+	ctx = context.WithValue(ctx, sharding.ShardingContextKey, "order_id")
 	db = db.WithContext(ctx)
 	// Randomly 2024 or 2025
 	orderYear := rand.Intn(2) + 2024
@@ -272,7 +269,7 @@ func InsertOrderByOrderIdKey(db *gorm.DB) error {
 func UpdateByOrderIdKey(db *gorm.DB, orderId string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx = context.WithValue(ctx, sharding.ContextKeyForShardingKey, "order_id")
+	ctx = context.WithValue(ctx, sharding.ShardingContextKey, "order_id")
 	db = db.WithContext(ctx)
 	db = db.Table("orders")
 	err := db.Model(&Order{}).Where("order_id=?", orderId).Update("product_id", 102).Error
@@ -285,7 +282,7 @@ func UpdateByOrderIdKey(db *gorm.DB, orderId string) error {
 func DeleteByOrderIdKey(db *gorm.DB, orderId string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx = context.WithValue(ctx, sharding.ContextKeyForShardingKey, "order_id")
+	ctx = context.WithValue(ctx, sharding.ShardingContextKey, "order_id")
 	db = db.WithContext(ctx)
 	db = db.Table("orders")
 	err := db.Where("order_id=? and product_id=?", orderId, 100).Delete(&Order{}).Error
@@ -299,7 +296,7 @@ func FindOrderByOrderIdKey(db *gorm.DB, orderId string) ([]Order, error) {
 	// Query example
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx = context.WithValue(ctx, sharding.ContextKeyForShardingKey, "order_id")
+	ctx = context.WithValue(ctx, sharding.ShardingContextKey, "order_id")
 	db = db.WithContext(ctx)
 	db = db.Table("orders")
 	err := db.Model(&Order{}).Where("order_id=?", orderId).Find(&orders).Error
@@ -321,7 +318,7 @@ type OrderByUserId struct {
 func InsertOrderByUserId(db *gorm.DB) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx = context.WithValue(ctx, sharding.ContextKeyForShardingKey, "user_id")
+	ctx = context.WithValue(ctx, sharding.ShardingContextKey, "user_id")
 	db = db.WithContext(ctx)
 	// Randomly 2024 or 2025
 	orderYear := rand.Intn(2) + 2024
@@ -347,7 +344,7 @@ func FindByUserIDKey(db *gorm.DB, userID int64) ([]Order, error) {
 	// Query example
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx = context.WithValue(ctx, sharding.ContextKeyForShardingKey, "user_id")
+	ctx = context.WithValue(ctx, sharding.ShardingContextKey, "user_id")
 	db = db.WithContext(ctx)
 	db = db.Table("orders")
 	err := db.Model(&Order{}).Where("user_id = ?", userID).Find(&orders).Error
