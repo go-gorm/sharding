@@ -104,6 +104,10 @@ type Config struct {
 	//	}
 	PrimaryKeyGeneratorFn func(tableIdx int64) int64
 
+	// ValueConverter converts values before they are used in SQL queries
+	// This is especially useful for handling custom types like UInt256
+	ValueConverter func(value interface{}) (interface{}, error)
+
 	engine DatabaseEngine
 }
 
@@ -852,7 +856,7 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 		colName := resTarget.ResTarget.Name
 
 		expr := list.Items[i]
-		exprValue, err := extractValueFromExpr(expr, args)
+		exprValue, err := s.extractValueFromExpr(expr, args, r) // Use updated method
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -1123,6 +1127,20 @@ func replaceSelectStmtTableName(selectStmt *pg_query.SelectStmt, tableMap map[st
 	for _, groupBy := range selectStmt.GroupClause {
 		replaceTableNames(groupBy, tableMap)
 	}
+}
+
+func (s *Sharding) extractValueFromExpr(expr *pg_query.Node, args []interface{}, config Config) (interface{}, error) {
+	value, err := extractValueFromExpr(expr, args)
+	if err != nil {
+		return nil, err
+	}
+
+	// If there's a value converter, use it
+	if config.ValueConverter != nil {
+		return config.ValueConverter(value)
+	}
+
+	return value, nil
 }
 
 func extractValueFromExpr(expr *pg_query.Node, args []interface{}) (interface{}, error) {

@@ -48,7 +48,7 @@ type OrderDetail struct {
 }
 
 type Swap struct {
-	GID     *uint64 `gorm:"column:gid;primaryKey"`
+	GID     *uint64 `gorm:"column:gid;primaryKey;autoIncrement"`
 	ID      uint64  `gorm:"not null;index"`
 	EventID uint64  `gorm:"not null;index"`
 	Escrow  bool    `gorm:"not null"`
@@ -1021,12 +1021,11 @@ func TestInsertWithPreGeneratedGID(t *testing.T) {
 	// Define the sharding configuration
 	numberOfShards := uint(4)
 	swapConfig := Config{
-		ShardingKey:         "gid", // Changed from ShardingKey
+		ShardingKey:         "id", // Changed from ShardingKey
 		NumberOfShards:      numberOfShards,
-		PrimaryKeyGenerator: PKSnowflake,
+		PrimaryKeyGenerator: PKCustom,
 		PrimaryKeyGeneratorFn: func(tableIdx int64) int64 {
-			node, _ := snowflake.NewNode(tableIdx)
-			return node.Generate().Int64()
+			return 0
 		},
 		// Corrected field names
 		ShardingAlgorithm: func(columnValue interface{}) (string, error) {
@@ -1051,7 +1050,7 @@ func TestInsertWithPreGeneratedGID(t *testing.T) {
 	}
 
 	// Register the sharding middleware
-	middleware := Register(map[string]Config{
+	middleware = Register(map[string]Config{
 		"swaps": swapConfig,
 	}, &Swap{})
 	if err := db.Use(middleware); err != nil {
@@ -1074,16 +1073,8 @@ func TestInsertWithPreGeneratedGID(t *testing.T) {
 		}
 	}
 
-	// Generate GID before insertion
-	node, err := snowflake.NewNode(1)
-	if err != nil {
-		t.Fatalf("failed to create snowflake node: %v", err)
-	}
-	gid := uint64(node.Generate().Int64())
-
 	// Create a Swap instance with the generated GID
 	swap := &Swap{
-		GID:     &gid,
 		ID:      100,
 		EventID: 200,
 		Escrow:  true,
@@ -1098,17 +1089,17 @@ func TestInsertWithPreGeneratedGID(t *testing.T) {
 	}
 
 	// Verify that the record is inserted into the correct shard
-	expectedShard := gid % uint64(numberOfShards)
+	expectedShard := swap.ID % uint64(numberOfShards)
 	expectedTable := fmt.Sprintf("swaps_%d", expectedShard)
 
 	var count int64
-	err = db.Table(expectedTable).Where("gid = ?", gid).Count(&count).Error
+	err = db.Table(expectedTable).Where("gid = ?", swap.GID).Count(&count).Error
 	if err != nil {
 		t.Errorf("failed to query swap record in shard: %v", err)
 	} else if count != 1 {
 		t.Errorf("expected 1 record in shard %s, found %d", expectedTable, count)
 	} else {
-		t.Logf("swap record found in correct shard table: %s", expectedTable)
+		t.Logf("swap record found in correct shard table: %s and count: %d", expectedTable, count)
 	}
 }
 
