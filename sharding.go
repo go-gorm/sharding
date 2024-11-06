@@ -570,7 +570,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			// Update the table name in the insert statement
 			if insertStmt.Relation != nil {
 				insertStmt.Relation.Relname = shardedTableName
-				log.Printf("Updated table name to '%s'\n", shardedTableName)
+				//log.Printf("Updated table name to '%s'\n", shardedTableName)
 
 				// Now handle ID generation with args
 				err := s.assignIDToInsert(insertStmt, r, &args)
@@ -640,7 +640,7 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 		var idFound bool
 		var idValue interface{}
 		for _, condition := range conditions {
-			log.Println("Traversing condition for 'id'")
+			//log.Println("Traversing condition for 'id'")
 			idFound, idValue, err = traverseConditionForKey("id", condition, args, knownKeys, aliasMap)
 			if idFound || err != nil {
 				break
@@ -1031,14 +1031,14 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 		}
 		// Replace table names in RangeVar nodes
 		if shardedName, exists := tableMap[n.RangeVar.Relname]; exists {
-			log.Printf("Replacing table name '%s' with sharded name '%s'\n", n.RangeVar.Relname, shardedName)
+			//log.Printf("Replacing table name '%s' with sharded name '%s'\n", n.RangeVar.Relname, shardedName)
 			n.RangeVar.Relname = shardedName
 			n.RangeVar.Location = -1 // Force quoting
 		}
 
 	case *pg_query.Node_UpdateStmt:
 		if newName, ok := tableMap[n.UpdateStmt.Relation.Relname]; ok {
-			log.Printf("Replacing table name '%s' with sharded name '%s' in UpdateStmt\n", n.UpdateStmt.Relation.Relname, newName)
+			//log.Printf("Replacing table name '%s' with sharded name '%s' in UpdateStmt\n", n.UpdateStmt.Relation.Relname, newName)
 			n.UpdateStmt.Relation.Relname = newName
 			n.UpdateStmt.Relation.Location = -1 // Force quoting
 		}
@@ -1048,7 +1048,7 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 		}
 	case *pg_query.Node_DeleteStmt:
 		if newName, ok := tableMap[n.DeleteStmt.Relation.Relname]; ok {
-			log.Printf("Replacing table name '%s' with sharded name '%s' in DeleteStmt\n", n.DeleteStmt.Relation.Relname, newName)
+			//log.Printf("Replacing table name '%s' with sharded name '%s' in DeleteStmt\n", n.DeleteStmt.Relation.Relname, newName)
 			n.DeleteStmt.Relation.Relname = newName
 			n.DeleteStmt.Relation.Location = -1 // Force quoting
 		}
@@ -1082,7 +1082,7 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 				originalTableName := stringNode.String_.Sval
 				if newTableName, exists := tableMap[originalTableName]; exists {
 					// Replace the table name with the sharded name
-					log.Printf("Replacing table name '%s' with sharded name '%s' in ColumnRef\n", originalTableName, newTableName)
+					//log.Printf("Replacing table name '%s' with sharded name '%s' in ColumnRef\n", originalTableName, newTableName)
 					stringNode.String_.Sval = newTableName
 				}
 			}
@@ -1284,15 +1284,15 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 				if val, exists := knownKeys[shardingKey]; exists {
 					return true, val, nil
 				}
-				log.Printf("Processing AExpr: Operator '%s'", opName)
-				log.Printf("Left Column: '%s', Right Column: '%s'", leftColName, rightColName)
-				log.Printf("Known Keys: %v", knownKeys)
+				//log.Printf("Processing AExpr: Operator '%s'", opName)
+				//log.Printf("Left Column: '%s', Right Column: '%s'", leftColName, rightColName)
+				//log.Printf("Known Keys: %v", knownKeys)
 			}
 
 		}
 
 	case *pg_query.Node_BoolExpr:
-		log.Printf("Processing BoolExpr of type '%s'", n.BoolExpr.Boolop)
+		//log.Printf("Processing BoolExpr of type '%s'", n.BoolExpr.Boolop)
 		for _, arg := range n.BoolExpr.Args {
 			keyFound, value, err = traverseConditionForKey(shardingKey, arg, args, knownKeys, aliasMap)
 			if keyFound || err != nil {
@@ -1399,7 +1399,7 @@ func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err 
 			log.Printf("Error in ShardingAlgorithm: %v\n", err)
 			return
 		}
-		log.Printf("Sharding key value: %v, Suffix: %s\n", value, suffix)
+		//log.Printf("Sharding key value: %v, Suffix: %s\n", value, suffix)
 	} else {
 		if r.ShardingAlgorithmByPrimaryKey == nil {
 			err = fmt.Errorf("there is not sharding key and ShardingAlgorithmByPrimaryKey is not configured")
@@ -1407,7 +1407,7 @@ func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err 
 			return
 		}
 		suffix = r.ShardingAlgorithmByPrimaryKey(id)
-		log.Printf("Sharding by primary key: %d, Suffix: %s\n", id, suffix)
+		//log.Printf("Sharding by primary key: %d, Suffix: %s\n", id, suffix)
 	}
 	return
 }
