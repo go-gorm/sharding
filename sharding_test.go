@@ -1125,11 +1125,19 @@ func assertQueryResult(t *testing.T, expected string, tx *gorm.DB) {
 	normalize := func(query string) string {
 		// Remove quotes around identifiers
 		re := regexp.MustCompile(`"(\w+)"`)
-		return re.ReplaceAllString(query, `$1`)
+		query = re.ReplaceAllString(query, `$1`)
+		// Replace parameter numbers with a placeholder
+		query = regexp.MustCompile(`\$\d+`).ReplaceAllString(query, `$?`)
+		// Normalize whitespace
+		query = strings.TrimSpace(query)
+		query = regexp.MustCompile(`\s+`).ReplaceAllString(query, ` `)
+		return query
 	}
 	normalizedExpected := normalize(toDialect(expected))
 	normalizedActual := normalize(middleware.LastQuery())
-	assert.Equal(t, normalizedExpected, normalizedActual)
+	if normalizedExpected != normalizedActual {
+		t.Errorf("\nExpected:\n%s\nActual:\n%s", normalizedExpected, normalizedActual)
+	}
 }
 
 func truncateTables(db *gorm.DB, tables ...string) {

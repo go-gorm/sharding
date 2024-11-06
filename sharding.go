@@ -510,7 +510,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 					if err != nil {
 						return ftQuery, stQuery, tableName, err
 					}
-					fmt.Printf("Extracted sharding key: %v, id: %d, keyFound: %v\n", value, id, keyFound)
+					//log.Printf("Extracted sharding key: %v, id: %d, keyFound: %v\n", value, id, keyFound)
 
 					currentSuffix, err := getSuffix(value, id, keyFound, r)
 					if err != nil {
@@ -538,7 +538,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 					if err != nil {
 						return ftQuery, stQuery, tableName, err
 					}
-					fmt.Printf("Extracted sharding key: %v, id: %d, keyFound: %v\n", value, id, keyFound)
+					//log.Printf("Extracted sharding key: %v, id: %d, keyFound: %v\n", value, id, keyFound)
 
 					currentSuffix, err := getSuffix(value, id, keyFound, r)
 					if err != nil {
@@ -890,13 +890,13 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 				return nil, 0, false, ErrInvalidID
 			}
 			id = idValue
-			fmt.Printf("ID found: %s = %v\n", colName, id)
+			//log.Printf("ID found: %s = %v\n", colName, id)
 		}
 
 		if colName == r.ShardingKey {
 			value = exprValue
 			keyFound = true
-			fmt.Printf("Sharding key found: %s = %v\n", colName, value)
+			//log.Printf("Sharding key found: %s = %v\n", colName, value)
 		}
 	}
 
