@@ -380,6 +380,8 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	var insertStmt *pg_query.InsertStmt
 	var selectStmt *pg_query.SelectStmt
 	var conditions []*pg_query.Node
+	// Initialize a map to hold table-specific sharded names
+	tableMap := make(map[string]string) // originalTableName -> shardedTableName
 
 	// Process the parsed statement to extract tables and conditions
 	switch stmtNode := stmt.Stmt.Node.(type) {
@@ -401,7 +403,31 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		isInsert = true
 		insertStmt = stmtNode.InsertStmt
 		if insertStmt.Relation != nil {
-			tables = []string{insertStmt.Relation.Relname}
+			// Get base table name
+			baseTable := insertStmt.Relation.Relname
+			tables = []string{baseTable}
+
+			// Update table name immediately to ensure RETURNING clause uses correct table
+			if shardedName, exists := tableMap[baseTable]; exists {
+				insertStmt.Relation.Relname = shardedName
+
+				// Also update any RETURNING clauses to use sharded table name
+				if insertStmt.ReturningList != nil {
+					for _, returningItem := range insertStmt.ReturningList {
+						if resTarget, ok := returningItem.Node.(*pg_query.Node_ResTarget); ok {
+							if colRef, ok := resTarget.ResTarget.Val.Node.(*pg_query.Node_ColumnRef); ok {
+								if len(colRef.ColumnRef.Fields) > 0 {
+									if stringNode, ok := colRef.ColumnRef.Fields[0].Node.(*pg_query.Node_String_); ok {
+										if stringNode.String_.Sval == baseTable {
+											stringNode.String_.Sval = shardedName
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 		} else {
 			return ftQuery, stQuery, tableName, fmt.Errorf("unexpected node type in InsertStmt.Relation")
 		}
@@ -439,9 +465,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	default:
 		return ftQuery, stQuery, "", fmt.Errorf("unsupported statement type")
 	}
-
-	// Initialize a map to hold table-specific sharded names
-	tableMap := make(map[string]string) // originalTableName -> shardedTableName
 
 	// Iterate through each table to determine its sharded name
 	for _, originalTableName := range tables {
@@ -1126,6 +1149,24 @@ func replaceSelectStmtTableName(selectStmt *pg_query.SelectStmt, tableMap map[st
 	replaceTableNames(selectStmt.HavingClause, tableMap)
 	for _, groupBy := range selectStmt.GroupClause {
 		replaceTableNames(groupBy, tableMap)
+	}
+
+	// Handle RETURNING clause for INSERT statements
+	if selectStmt.ValuesLists != nil {
+		for _, returning := range selectStmt.ValuesLists {
+			if resTarget, ok := returning.Node.(*pg_query.Node_ResTarget); ok {
+				if colRef, ok := resTarget.ResTarget.Val.Node.(*pg_query.Node_ColumnRef); ok {
+					for _, field := range colRef.ColumnRef.Fields {
+						if stringNode, ok := field.Node.(*pg_query.Node_String_); ok {
+							originalTableName := stringNode.String_.Sval
+							if newTableName, exists := tableMap[originalTableName]; exists {
+								stringNode.String_.Sval = newTableName
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 }
 

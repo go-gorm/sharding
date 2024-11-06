@@ -209,7 +209,7 @@ func init() {
 			createOrdersTable(table)
 		} else if strings.HasPrefix(table, "order_details") {
 			createOrderDetailsTable(table)
-		} else if strings.HasPrefix(table, "users") { // Add this condition
+		} else if strings.HasPrefix(table, "users") {
 			createUsersTable(table)
 		}
 	}
@@ -295,6 +295,7 @@ func dropTables() {
 		"order_details", "order_details_0", "order_details_1", "order_details_2", "order_details_3",
 		"categories",
 		"users", "users_0", "users_1", "users_2", "users_3",
+		"swaps", "swaps_0", "swaps_1", "swaps_2", "swaps_3",
 	}
 	for _, table := range tables {
 		db.Exec("DROP TABLE IF EXISTS " + table)
