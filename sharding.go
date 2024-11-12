@@ -183,7 +183,7 @@ func (s *Sharding) compile() error {
 		// Set up ShardingAlgorithm if not provided
 		if c.ShardingAlgorithm == nil {
 			if c.NumberOfShards == 0 {
-				return errors.New("NumberOfShards must be specified if ShardingAlgorithm is not provided")
+				return errors.New("NumberOfShards must be specified if ShardingAlgorithm is not provided for table" + t)
 			}
 			switch {
 			case c.NumberOfShards < 10:
