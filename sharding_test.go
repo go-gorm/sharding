@@ -143,12 +143,15 @@ func init() {
 		})
 		dbNoID, _ = gorm.Open(postgres.New(dbNoIDConfig), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
+			Logger:                                   logger.Default.LogMode(logger.Info),
 		})
 		dbRead, _ = gorm.Open(postgres.New(dbReadConfig), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
+			Logger:                                   logger.Default.LogMode(logger.Info),
 		})
 		dbWrite, _ = gorm.Open(postgres.New(dbWriteConfig), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
+			Logger:                                   logger.Default.LogMode(logger.Info),
 		})
 	}
 
