@@ -51,7 +51,7 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	result, err = pool.ConnPool.ExecContext(ctx, stQuery, args...)
 	pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
 		rowsAffected, _ = result.RowsAffected()
-		return pool.sharding.Explain(stQuery, args...), rowsAffected
+		return "Sharding Exec : " + pool.sharding.Explain(stQuery, args...), rowsAffected
 	}, pool.sharding.Error)
 
 	return result, err
@@ -73,7 +73,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...any
 	var rows *sql.Rows
 	rows, err = pool.ConnPool.QueryContext(ctx, stQuery, args...)
 	pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
-		return pool.sharding.Explain(stQuery, args...), 0
+		return "Sharding Query : " + pool.sharding.Explain(stQuery, args...), 0
 	}, pool.sharding.Error)
 
 	return rows, err
