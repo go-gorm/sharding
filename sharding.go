@@ -432,20 +432,27 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 		}
 
 		newTable := &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
-
+		// 替换 WHERE 子句中的表前缀
+		condition = replaceTablePrefixInWhere(condition, tableName, newTable.Name.Name) // 使用 newTable.Name.Name
 		switch stmt := expr.(type) {
 		case *sqlparser.SelectStatement:
 			ftQuery = stmt.String()
 			stmt.FromItems = newTable
 			stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
+			// 更新 WHERE 条件
+			stmt.Condition = condition
 			stQuery = stmt.String()
 		case *sqlparser.UpdateStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
+			// 更新 WHERE 条件
+			stmt.Condition = condition
 			stQuery = stmt.String()
 		case *sqlparser.DeleteStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
+			// 更新 WHERE 条件
+			stmt.Condition = condition
 			stQuery = stmt.String()
 		}
 	}
@@ -565,4 +572,34 @@ func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName
 	}
 
 	return orderBy
+}
+
+func replaceTablePrefixInWhere(condition sqlparser.Expr, oldTableName, newTableName string) sqlparser.Expr {
+	if condition == nil {
+		return nil
+	}
+
+	switch cond := condition.(type) {
+	case *sqlparser.BinaryExpr:
+		// 二元表达式（如 a = b 或 a > b），递归处理左右表达式
+		cond.X = replaceTablePrefixInWhere(cond.X, oldTableName, newTableName)
+		cond.Y = replaceTablePrefixInWhere(cond.Y, oldTableName, newTableName)
+		return cond
+
+	case *sqlparser.ParenExpr:
+		// 括号表达式，递归处理内部表达式
+		cond.X = replaceTablePrefixInWhere(cond.X, oldTableName, newTableName)
+		return cond
+
+	case *sqlparser.QualifiedRef:
+		// 如果是带表前缀的字段，检查是否需要替换表名
+		if cond.Table != nil && cond.Table.Name == oldTableName {
+			cond.Table.Name = newTableName
+		}
+		return cond
+
+	default:
+		// 对于其他类型的表达式，直接返回
+		return condition
+	}
 }
