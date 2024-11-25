@@ -432,26 +432,26 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 		}
 
 		newTable := &sqlparser.TableName{Name: &sqlparser.Ident{Name: tableName + suffix}}
-		// 替换 WHERE 子句中的表前缀
-		condition = replaceTablePrefixInWhere(condition, tableName, newTable.Name.Name) // 使用 newTable.Name.Name
+		// Replace table prefix in WHERE clause
+		condition = replaceTablePrefixInWhere(condition, tableName, newTable.Name.Name) // Use newTable.Name.Name
 		switch stmt := expr.(type) {
 		case *sqlparser.SelectStatement:
 			ftQuery = stmt.String()
 			stmt.FromItems = newTable
 			stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
-			// 更新 WHERE 条件
+			// Update WHERE condition
 			stmt.Condition = condition
 			stQuery = stmt.String()
 		case *sqlparser.UpdateStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
-			// 更新 WHERE 条件
+			// Update WHERE condition
 			stmt.Condition = condition
 			stQuery = stmt.String()
 		case *sqlparser.DeleteStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
-			// 更新 WHERE 条件
+			// Update WHERE condition
 			stmt.Condition = condition
 			stQuery = stmt.String()
 		}
@@ -573,33 +573,45 @@ func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName
 
 	return orderBy
 }
-
 func replaceTablePrefixInWhere(condition sqlparser.Expr, oldTableName, newTableName string) sqlparser.Expr {
 	if condition == nil {
 		return nil
 	}
 
-	switch cond := condition.(type) {
-	case *sqlparser.BinaryExpr:
-		// 二元表达式（如 a = b 或 a > b），递归处理左右表达式
-		cond.X = replaceTablePrefixInWhere(cond.X, oldTableName, newTableName)
-		cond.Y = replaceTablePrefixInWhere(cond.Y, oldTableName, newTableName)
-		return cond
+	// Use a stack to store expressions that need to be processed
+	stack := []sqlparser.Expr{condition}
 
-	case *sqlparser.ParenExpr:
-		// 括号表达式，递归处理内部表达式
-		cond.X = replaceTablePrefixInWhere(cond.X, oldTableName, newTableName)
-		return cond
+	for len(stack) > 0 {
+		// Pop the current expression from the stack
+		curr := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
 
-	case *sqlparser.QualifiedRef:
-		// 如果是带表前缀的字段，检查是否需要替换表名
-		if cond.Table != nil && cond.Table.Name == oldTableName {
-			cond.Table.Name = newTableName
+		switch cond := curr.(type) {
+		case *sqlparser.BinaryExpr:
+			// Push left and right sub-expressions of the binary expression onto the stack
+			if cond.X != nil {
+				stack = append(stack, cond.X)
+			}
+			if cond.Y != nil {
+				stack = append(stack, cond.Y)
+			}
+
+		case *sqlparser.ParenExpr:
+			// Push the inner expression of the parenthesis expression onto the stack
+			if cond.X != nil {
+				stack = append(stack, cond.X)
+			}
+
+		case *sqlparser.QualifiedRef:
+			// If it is a field reference, check if the table name needs to be replaced
+			if cond.Table != nil && cond.Table.Name == oldTableName {
+				cond.Table.Name = newTableName
+			}
+
+		default:
+			// Other types of expressions do not need to be processed
 		}
-		return cond
-
-	default:
-		// 对于其他类型的表达式，直接返回
-		return condition
 	}
+
+	return condition
 }

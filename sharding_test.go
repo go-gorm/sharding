@@ -560,3 +560,296 @@ func mysqlDialector() bool {
 func mariadbDialector() bool {
 	return os.Getenv("DIALECTOR") == "mariadb"
 }
+
+// TestSelect1_withQualifiedRef tests whether a query with both `user_id` and `id` conditions
+// is routed to the appropriate shard (`orders_1`). The SQL is expected to be rewritten with
+// fully qualified table references.
+func TestSelect1_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.user_id", 101).
+		Where("orders.id", node.Generate().Int64()).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."user_id" = $1 AND "orders_1"."id" = $2`, tx)
+}
+
+// TestSelect2_withQualifiedRef ensures that the order of conditions (`id` and `user_id`)
+// does not affect the query routing. The middleware should rewrite the query to target
+// the correct shard (`orders_1`).
+func TestSelect2_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.id", node.Generate().Int64()).
+		Where("orders.user_id", 101).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."id" = $1 AND "orders_1"."user_id" = $2`, tx)
+}
+
+// TestSelect3_withQualifiedRef verifies whether queries with mixed parameterized (`id`)
+// and inline (`user_id = 101`) conditions are correctly routed to `orders_1` and rewritten
+// with appropriate table references.
+func TestSelect3_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.id", node.Generate().Int64()).
+		Where("orders.user_id = 101").
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."id" = $1 AND orders_1.user_id = 101`, tx)
+}
+
+// TestSelect4_withQualifiedRef verifies that queries filtering by `product` and `user_id`
+// correctly route to the shard `orders_0`. The SQL is expected to be rewritten with fully
+// qualified table references.
+func TestSelect4_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.product", "iPad").
+		Where("orders.user_id", 100).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_0 WHERE "orders_0"."product" = $1 AND "orders_0"."user_id" = $2`, tx)
+}
+
+// TestSelect5_withQualifiedRef ensures that queries with only `user_id` conditions
+// are routed to the correct shard (`orders_1`).
+func TestSelect5_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.user_id = 101").
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE orders_1.user_id = 101`, tx)
+}
+
+// TestSelect6_withQualifiedRef verifies that queries filtering only by `id`
+// are routed to the correct shard (`orders_1`).
+func TestSelect6_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.id", node.Generate().Int64()).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."id" = $1`, tx)
+}
+
+// TestSelect7_withQualifiedRef checks if combined conditions (`user_id` and `id > ?`)
+// are correctly rewritten and routed to `orders_1`.
+func TestSelect7_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.user_id", 101).
+		Where("orders.id > ?", node.Generate().Int64()).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."user_id" = $1 AND orders_1.id > $2`, tx)
+}
+
+// TestSelect8_withQualifiedRef verifies that reversing the order of conditions
+// (`id > ?` and `user_id`) does not affect routing to the correct shard (`orders_1`).
+func TestSelect8_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.id > ?", node.Generate().Int64()).
+		Where("orders.user_id", 101).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE orders_1.id > $1 AND "orders_1"."user_id" = $2`, tx)
+}
+
+// TestSelect9_withQualifiedRef ensures that `First` queries with `user_id`
+// are routed to the correct shard (`orders_1`) with proper ordering and limit applied.
+func TestSelect9_withQualifiedRef(t *testing.T) {
+	tx := db.Model(&Order{}).
+		Where("orders.user_id = 101").
+		First(&[]Order{})
+	t.Logf("last query: %s", middleware.LastQuery())
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE orders_1.user_id = 101 ORDER BY "orders_1"."id" LIMIT 1`, tx)
+}
+
+// TestSelect10_withQualifiedRef verifies that queries with the `nosharding` comment
+// bypass sharding middleware and target the base table `orders`.
+func TestSelect10_withQualifiedRef(t *testing.T) {
+	tx := db.Clauses(hints.Comment("select", "nosharding")).
+		Table("orders").
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT /* nosharding */ * FROM "orders"`, tx)
+}
+
+// TestSelect11_withQualifiedRef ensures that `nosharding` comments apply even with
+// filtering conditions (`user_id`), allowing the query to bypass the middleware.
+func TestSelect11_withQualifiedRef(t *testing.T) {
+	tx := db.Clauses(hints.Comment("select", "nosharding")).
+		Table("orders").
+		Where("orders.user_id", 101).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT /* nosharding */ * FROM "orders" WHERE "orders"."user_id" = $1`, tx)
+}
+
+// TestSelect12_withQualifiedRef tests raw SQL queries with qualified schema names
+// (`public.orders`) to ensure they are executed as-is without middleware interference.
+func TestSelect12_withQualifiedRef(t *testing.T) {
+	sql := toDialect(`SELECT * FROM "public"."orders" WHERE orders.user_id = 101`)
+	tx := db.Raw(sql).Find(&[]Order{})
+	assertQueryResult(t, sql, tx)
+}
+
+// TestSelect13_withQualifiedRef verifies that raw SQL queries (e.g., `SELECT 1`)
+// are executed correctly and unaffected by sharding middleware.
+func TestSelect13_withQualifiedRef(t *testing.T) {
+	var n int
+	tx := db.Raw("SELECT 1").Find(&n)
+	assertQueryResult(t, `SELECT 1`, tx)
+}
+
+// TestSelect14_withQualifiedRef ensures that queries on a database without primary keys
+// still route correctly to the appropriate shard (`orders_1`).
+func TestSelect14_withQualifiedRef(t *testing.T) {
+	dbNoID.Table("orders").
+		Where("orders.user_id = 101").
+		Find(&[]Order{})
+	expected := `SELECT * FROM orders_1 WHERE orders_1.user_id = 101`
+	assert.Equal(t, toDialect(expected), middlewareNoID.LastQuery())
+}
+
+// TestUpdate_withQualifiedRef tests updating the `product` field for orders with a
+// specific `user_id`. It ensures that the SQL query is correctly rewritten with table
+// prefixes to target the appropriate sharded table (`orders_0`).
+func TestUpdate_withQualifiedRef(t *testing.T) {
+	tx := db.Model(&Order{}).
+		Where("orders.user_id = ?", 100).
+		Update("product", "new title")
+	assertQueryResult(t, `UPDATE orders_0 SET "product" = $1 WHERE orders_0.user_id = $2`, tx)
+}
+
+// TestDelete_withQualifiedRef tests deleting orders with a specific `user_id`.
+// It verifies that the SQL query is correctly rewritten with table prefixes
+// to target the appropriate sharded table (`orders_0`).
+func TestDelete_withQualifiedRef(t *testing.T) {
+	tx := db.
+		Where("orders.user_id = ?", 100).
+		Delete(&Order{})
+	assertQueryResult(t, `DELETE FROM orders_0 WHERE orders_0.user_id = $1`, tx)
+}
+
+// TestSelectMissingShardingKey_withQualifiedRef tests selecting orders without specifying
+// the sharding key (`user_id`). It ensures that the sharding middleware detects the missing
+// sharding key and returns the appropriate error.
+func TestSelectMissingShardingKey_withQualifiedRef(t *testing.T) {
+	err := db.Exec(`SELECT * FROM "orders" WHERE "orders"."product" = 'iPad'`).Error
+	assert.Equal(t, ErrMissingShardingKey, err)
+}
+
+// TestSelectNoSharding_withQualifiedRef tests selecting orders with a `nosharding` comment.
+// It ensures that the sharding middleware does not rewrite the SQL query when the hint is present.
+func TestSelectNoSharding_withQualifiedRef(t *testing.T) {
+	sql := toDialect(`SELECT /* nosharding */ * FROM "orders" WHERE "orders"."product" = 'iPad'`)
+	err := db.Exec(sql).Error
+	assert.Equal[error](t, nil, err)
+}
+
+// TestNoEq_withQualifiedRef tests selecting orders with a non-equal condition on the sharding key "user_id".
+// It verifies that the sharding middleware detects the unsupported condition and returns the appropriate error.
+func TestNoEq_withQualifiedRef(t *testing.T) {
+	err := db.Model(&Order{}).Where("orders.user_id <> ?", 101).Find([]Order{}).Error
+	assert.Equal(t, ErrMissingShardingKey, err)
+}
+
+// TestShardingKeyOK_withQualifiedRef tests selecting orders with valid sharding key conditions "user_id = ?" and "id > ?".
+// It ensures that the sharding middleware successfully rewrites the SQL query to target the correct shard.
+func TestShardingKeyOK_withQualifiedRef(t *testing.T) {
+	err := db.Model(&Order{}).
+		Where("orders.user_id = ?", 101).
+		Where("orders.id > ?", int64(100)).
+		Find(&[]Order{}).Error
+	assert.Equal[error](t, nil, err)
+}
+
+// TestShardingKeyNotOK_withQualifiedRef tests selecting orders with invalid sharding key conditions "user_id > ?" and "id > ?".
+// It verifies that the sharding middleware detects the unsupported conditions and returns the appropriate error.
+func TestShardingKeyNotOK_withQualifiedRef(t *testing.T) {
+	err := db.Model(&Order{}).
+		Where("orders.user_id > ?", 101).
+		Where("orders.id > ?", int64(100)).
+		Find(&[]Order{}).Error
+	assert.Equal(t, ErrMissingShardingKey, err)
+}
+
+// TestShardingIdOK_withQualifiedRef tests selecting orders with a valid sharding key condition on "id = ?" and "user_id > ?".
+// It ensures that the sharding middleware successfully rewrites the SQL query to target the correct shard.
+func TestShardingIdOK_withQualifiedRef(t *testing.T) {
+	err := db.Model(&Order{}).
+		Where("orders.id = ?", int64(101)).
+		Where("orders.user_id > ?", 100).
+		Find(&[]Order{}).Error
+	assert.Equal[error](t, nil, err)
+}
+
+// TestNoShardingCategory_withQualifiedRef tests selecting categories without using sharding keys.
+// It ensures that the sharding middleware does not interfere with tables that are not sharded.
+func TestNoShardingCategory_withQualifiedRef(t *testing.T) {
+	categories := []Category{}
+	tx := db.Model(&Category{}).Where("id = ?", 1).Find(&categories)
+	assertQueryResult(t, `SELECT * FROM "categories" WHERE id = $1`, tx)
+}
+
+// TestPKPGSequence_withQualifiedRef tests inserting an order using the PostgreSQL sequence primary key generator.
+// It ensures that the sharding middleware correctly increments the sequence and rewrites the SQL query to target the appropriate shard.
+func TestPKPGSequence_withQualifiedRef(t *testing.T) {
+	if mysqlDialector() {
+		return
+	}
+
+	db, _ := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	shardingConfig.PrimaryKeyGenerator = PKPGSequence
+	middleware := Register(shardingConfig, &Order{})
+	db.Use(middleware)
+
+	db.Exec("SELECT setval('" + pgSeqName("orders") + "', 42)")
+	db.Create(&Order{UserID: 100, Product: "iPhone"})
+	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, 43) RETURNING "id"`
+	assert.Equal(t, expected, middleware.LastQuery())
+}
+
+// TestPKMySQLSequence_withQualifiedRef tests inserting an order using the MySQL sequence primary key generator.
+// It verifies that the sharding middleware correctly updates the sequence and rewrites the SQL query to target the appropriate shard.
+func TestPKMySQLSequence_withQualifiedRef(t *testing.T) {
+	if !mysqlDialector() {
+		return
+	}
+
+	db, _ := gorm.Open(mysql.Open(dbURL()), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	shardingConfig.PrimaryKeyGenerator = PKMySQLSequence
+	middleware := Register(shardingConfig, &Order{})
+	db.Use(middleware)
+
+	db.Exec("UPDATE `" + mySQLSeqName("orders") + "` SET id = 42")
+	db.Create(&Order{UserID: 100, Product: "iPhone"})
+	expected := "INSERT INTO orders_0 (`user_id`, `product`, id) VALUES (?, ?, 43)"
+	if mariadbDialector() {
+		expected = expected + " RETURNING `id`"
+	}
+	assert.Equal(t, expected, middleware.LastQuery())
+}
+
+// TestDataRace_withQualifiedRef tests for data races in concurrent operations.
+// It ensures that the sharding middleware handles concurrent queries without causing race conditions.
+func TestDataRace_withQualifiedRef(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan error)
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					err := db.Model(&Order{}).Where("orders.user_id", 100).Find(&[]Order{}).Error
+					if err != nil {
+						ch <- err
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	select {
+	case <-time.After(time.Millisecond * 50):
+		cancel()
+	case err := <-ch:
+		cancel()
+		t.Fatal(err)
+	}
+}
