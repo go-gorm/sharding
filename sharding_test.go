@@ -560,3 +560,198 @@ func mysqlDialector() bool {
 func mariadbDialector() bool {
 	return os.Getenv("DIALECTOR") == "mariadb"
 }
+
+func TestSelect1_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.user_id", 101).
+		Where("orders.id", node.Generate().Int64()).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."user_id" = $1 AND "orders_1"."id" = $2`, tx)
+}
+
+func TestSelect2_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.id", node.Generate().Int64()).
+		Where("orders.user_id", 101).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."id" = $1 AND "orders_1"."user_id" = $2`, tx)
+}
+
+func TestSelect3_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.id", node.Generate().Int64()).
+		Where("orders.user_id = 101").
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."id" = $1 AND orders_1.user_id = 101`, tx)
+}
+
+func TestSelect4_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.product", "iPad").
+		Where("orders.user_id", 100).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_0 WHERE "orders_0"."product" = $1 AND "orders_0"."user_id" = $2`, tx)
+}
+
+func TestSelect5_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.user_id = 101").
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE orders_1.user_id = 101`, tx)
+}
+
+func TestSelect6_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.id", node.Generate().Int64()).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."id" = $1`, tx)
+}
+
+func TestSelect7_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.user_id", 101).
+		Where("orders.id > ?", node.Generate().Int64()).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "orders_1"."user_id" = $1 AND orders_1.id > $2`, tx)
+}
+
+func TestSelect8_withQualifiedRef(t *testing.T) {
+	tx := db.Table("orders").
+		Where("orders.id > ?", node.Generate().Int64()).
+		Where("orders.user_id", 101).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE orders_1.id > $1 AND "orders_1"."user_id" = $2`, tx)
+}
+
+func TestSelect9_withQualifiedRef(t *testing.T) {
+	tx := db.Model(&Order{}).
+		Where("orders.user_id = 101").
+		First(&[]Order{})
+	t.Logf("last query: %s", middleware.LastQuery())
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE orders_1.user_id = 101 ORDER BY "orders_1"."id" LIMIT 1`, tx)
+}
+
+func TestSelect10_withQualifiedRef(t *testing.T) {
+	tx := db.Clauses(hints.Comment("select", "nosharding")).
+		Table("orders").
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT /* nosharding */ * FROM "orders"`, tx)
+}
+
+func TestSelect11_withQualifiedRef(t *testing.T) {
+	tx := db.Clauses(hints.Comment("select", "nosharding")).
+		Table("orders").
+		Where("orders.user_id", 101).
+		Find(&[]Order{})
+	assertQueryResult(t, `SELECT /* nosharding */ * FROM "orders" WHERE "orders"."user_id" = $1`, tx)
+}
+
+func TestSelect12_withQualifiedRef(t *testing.T) {
+	sql := toDialect(`SELECT * FROM "public"."orders" WHERE orders.user_id = 101`)
+	tx := db.Raw(sql).Find(&[]Order{})
+	assertQueryResult(t, sql, tx)
+}
+
+func TestSelect13_withQualifiedRef(t *testing.T) {
+	var n int
+	tx := db.Raw("SELECT 1").Find(&n)
+	assertQueryResult(t, `SELECT 1`, tx)
+}
+
+func TestSelect14_withQualifiedRef(t *testing.T) {
+	dbNoID.Table("orders").
+		Where("orders.user_id = 101").
+		Find(&[]Order{})
+	expected := `SELECT * FROM orders_1 WHERE orders_1.user_id = 101`
+	assert.Equal(t, toDialect(expected), middlewareNoID.LastQuery())
+}
+
+func TestUpdate_withQualifiedRef(t *testing.T) {
+	tx := db.Model(&Order{}).
+		Where("orders.user_id = ?", 100).
+		Update("product", "new title")
+	assertQueryResult(t, `UPDATE orders_0 SET "product" = $1 WHERE orders_0.user_id = $2`, tx)
+}
+
+func TestDelete_withQualifiedRef(t *testing.T) {
+	tx := db.
+		Where("orders.user_id = ?", 100).
+		Delete(&Order{})
+	assertQueryResult(t, `DELETE FROM orders_0 WHERE orders_0.user_id = $1`, tx)
+}
+
+func TestSelectMissingShardingKey_withQualifiedRef(t *testing.T) {
+	err := db.Exec(`SELECT * FROM "orders" WHERE "orders"."product" = 'iPad'`).Error
+	assert.Equal(t, ErrMissingShardingKey, err)
+}
+
+func TestSelectNoSharding_withQualifiedRef(t *testing.T) {
+	sql := toDialect(`SELECT /* nosharding */ * FROM "orders" WHERE "orders"."product" = 'iPad'`)
+	err := db.Exec(sql).Error
+	assert.Equal[error](t, nil, err)
+}
+
+func TestNoEq_withQualifiedRef(t *testing.T) {
+	err := db.Model(&Order{}).Where("orders.user_id <> ?", 101).Find([]Order{}).Error
+	assert.Equal(t, ErrMissingShardingKey, err)
+}
+
+func TestShardingKeyOK_withQualifiedRef(t *testing.T) {
+	err := db.Model(&Order{}).
+		Where("orders.user_id = ?", 101).
+		Where("orders.id > ?", int64(100)).
+		Find(&[]Order{}).Error
+	assert.Equal[error](t, nil, err)
+}
+
+func TestShardingKeyNotOK_withQualifiedRef(t *testing.T) {
+	err := db.Model(&Order{}).
+		Where("orders.user_id > ?", 101).
+		Where("orders.id > ?", int64(100)).
+		Find(&[]Order{}).Error
+	assert.Equal(t, ErrMissingShardingKey, err)
+}
+
+func TestShardingIdOK_withQualifiedRef(t *testing.T) {
+	err := db.Model(&Order{}).
+		Where("orders.id = ?", int64(101)).
+		Where("orders.user_id > ?", 100).
+		Find(&[]Order{}).Error
+	assert.Equal[error](t, nil, err)
+}
+
+func TestNoShardingCategory_withQualifiedRef(t *testing.T) {
+	categories := []Category{}
+	tx := db.Model(&Category{}).Where("id = ?", 1).Find(&categories)
+	assertQueryResult(t, `SELECT * FROM "categories" WHERE id = $1`, tx)
+}
+
+func TestDataRace_withQualifiedRef(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan error)
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					err := db.Model(&Order{}).Where("orders.user_id", 100).Find(&[]Order{}).Error
+					if err != nil {
+						ch <- err
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	select {
+	case <-time.After(time.Millisecond * 50):
+		cancel()
+	case err := <-ch:
+		cancel()
+		t.Fatal(err)
+	}
+}
