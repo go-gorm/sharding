@@ -35,8 +35,6 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 
 	pool.sharding.querys.Store("last_query", stQuery)
 
-	ctx = WithShardingContext(ctx)
-
 	if table != "" {
 		if r, ok := pool.sharding.configs[table]; ok {
 			if r.DoubleWrite {
@@ -71,9 +69,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...any
 	}
 
 	pool.sharding.querys.Store("last_query", stQuery)
-
-	ctx = WithShardingContext(ctx)
-
+	
 	var rows *sql.Rows
 	rows, err = pool.ConnPool.QueryContext(ctx, stQuery, args...)
 	pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
