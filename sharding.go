@@ -399,6 +399,50 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		joinConditions := collectJoinConditions(selectStmt)
 		conditions = append(conditions, joinConditions...)
 
+		// If this is a SELECT without sharding key conditions
+		if isSelect && len(conditions) > 0 {
+			hasShardingKey := false
+			for _, table := range tables {
+				if cfg, ok := s.configs[table]; ok {
+					shardingKey := cfg.ShardingKey
+					_, _, keyFound, _ := s.extractShardingKeyFromConditions(shardingKey, conditions, args, nil, table)
+					if keyFound {
+						hasShardingKey = true
+						break
+					}
+				}
+			}
+
+			// If no sharding key found, we have two options:
+			if !hasShardingKey {
+				// Option 1: Fall back to the main table if DoubleWrite is enabled
+				for _, table := range tables {
+					if cfg, ok := s.configs[table]; ok && cfg.DoubleWrite {
+						return ftQuery, stQuery, tableName, nil
+					}
+				}
+				// Option 2: Query all shards
+				var allQueries []string
+				for _, table := range tables {
+					if cfg, ok := s.configs[table]; ok {
+						suffixes := cfg.ShardingSuffixs()
+						for _, suffix := range suffixes {
+							shardedQuery := query
+							shardedQuery = strings.Replace(shardedQuery, table, table+suffix, -1)
+							allQueries = append(allQueries, shardedQuery)
+						}
+					}
+				}
+
+				if len(allQueries) > 0 {
+					// Create a UNION ALL query combining all shards
+					stQuery = strings.Join(allQueries, " UNION ALL ")
+					return ftQuery, stQuery, tableName, nil
+				}
+
+			}
+		}
+
 	case *pg_query.Node_InsertStmt:
 		isInsert = true
 		insertStmt = stmtNode.InsertStmt
