@@ -16,6 +16,16 @@ import (
 	"sync"
 )
 
+// PartitionType defines the type of partitioning strategy
+type PartitionType string
+
+const (
+	// PartitionTypeHash represents hash-based partitioning
+	PartitionTypeHash PartitionType = "hash"
+	// PartitionTypeList represents list-based partitioning
+	PartitionTypeList PartitionType = "list"
+)
+
 var (
 	ErrMissingShardingKey = errors.New("sharding key or id required, and use operator =")
 	ErrInvalidID          = errors.New("invalid id format")
@@ -32,6 +42,7 @@ type Sharding struct {
 	configs        map[string]Config
 	querys         sync.Map
 	snowflakeNodes []*snowflake.Node
+	globalIndices  *GlobalIndexRegistry
 
 	_config Config
 	_tables []any
@@ -47,6 +58,9 @@ type Config struct {
 	// ShardingKey specifies the table column you want to used for sharding the table rows.
 	// For example, for a product order table, you may want to split the rows by `user_id`.
 	ShardingKey string
+
+	// PartitionType specifies which partitioning strategy to use
+	PartitionType PartitionType
 
 	// NumberOfShards specifies how many tables you want to sharding.
 	NumberOfShards uint
@@ -108,6 +122,14 @@ type Config struct {
 	// This is especially useful for handling custom types like UInt256
 	ValueConverter func(value interface{}) (interface{}, error)
 
+	// ListValues maps category values to partition numbers (for list partitioning)
+	// For example: {"ERC20": 0, "ERC721": 1, "ERC1155": 2}
+	ListValues map[string]int
+
+	// DefaultPartition specifies which partition to use for values not in ListValues
+	// Set to -1 to throw an error when a value doesn't match
+	DefaultPartition int
+
 	engine DatabaseEngine
 }
 
@@ -130,6 +152,8 @@ func (s *Sharding) compile() error {
 	if s.configs == nil {
 		s.configs = make(map[string]Config)
 	}
+
+	// Process all tables and ensure they have a config
 	for _, table := range s._tables {
 		var tableName string
 		if t, ok := table.(string); ok {
@@ -148,9 +172,16 @@ func (s *Sharding) compile() error {
 		}
 	}
 
+	// Process configuration for each table
 	for t, c := range s.configs {
+		// Set the default partition type if not specified
+		if c.PartitionType == "" {
+			c.PartitionType = PartitionTypeHash
+		}
+
+		// Validate NumberOfShards for Snowflake
 		if c.NumberOfShards > 1024 && c.PrimaryKeyGenerator == PKSnowflake {
-			panic("Snowflake NumberOfShards should be less than 1024")
+			return errors.New("Snowflake NumberOfShards should be less than 1024")
 		}
 
 		// Set up PrimaryKeyGeneratorFn based on PrimaryKeyGenerator
@@ -180,11 +211,8 @@ func (s *Sharding) compile() error {
 			return errors.New("PrimaryKeyGenerator must be one of PKSnowflake, PKPGSequence, PKMySQLSequence, or PKCustom")
 		}
 
-		// Set up ShardingAlgorithm if not provided
-		if c.ShardingAlgorithm == nil {
-			if c.NumberOfShards == 0 {
-				return errors.New("NumberOfShards must be specified if ShardingAlgorithm is not provided for table" + t)
-			}
+		// Set up table format based on NumberOfShards
+		if c.tableFormat == "" {
 			switch {
 			case c.NumberOfShards < 10:
 				c.tableFormat = "_%01d"
@@ -197,59 +225,40 @@ func (s *Sharding) compile() error {
 			default:
 				return errors.New("NumberOfShards exceeds maximum allowed shards")
 			}
-			c.ShardingAlgorithm = func(value any) (string, error) {
-				id := 0
-				switch v := value.(type) {
-				case int:
-					id = v
-				case int64:
-					id = int(v)
-				case int32:
-					id = int(v)
-				case int16:
-					id = int(v)
-				case int8:
-					id = int(v)
-				case uint:
-					id = int(v)
-				case uint64:
-					id = int(v)
-				case uint32:
-					id = int(v)
-				case uint16:
-					id = int(v)
-				case uint8:
-					id = int(v)
-				case float64:
-					id = int(v)
-				case float32:
-					id = int(v)
-				case string:
-					var err error
-					id, err = strconv.Atoi(v)
-					if err != nil {
-						id = int(crc32.ChecksumIEEE([]byte(v)))
-					}
-				default:
-					return "", fmt.Errorf("default algorithm only supports integer and string types; specify your own ShardingAlgorithm")
-				}
+		}
 
-				return fmt.Sprintf(c.tableFormat, id%int(c.NumberOfShards)), nil
+		// Set up ShardingAlgorithm if not provided, based on partition type
+		if c.ShardingAlgorithm == nil {
+			switch c.PartitionType {
+			case PartitionTypeHash:
+				c.ShardingAlgorithm = defaultHashAlgorithm(&c)
+			case PartitionTypeList:
+				if len(c.ListValues) == 0 {
+					return errors.New("ListValues must be provided for list partitioning")
+				}
+				c.ShardingAlgorithm = defaultListAlgorithm(&c)
+			default:
+				return fmt.Errorf("unsupported partition type: %s", c.PartitionType)
 			}
 		}
 
 		// Set up ShardingSuffixs if not provided
 		if c.ShardingSuffixs == nil {
-			c.ShardingSuffixs = func() []string {
-				var suffixes []string
-				for i := 0; i < int(c.NumberOfShards); i++ {
-					suffix, err := c.ShardingAlgorithm(i)
-					if err != nil {
-						return nil
+			switch c.PartitionType {
+			case PartitionTypeHash:
+				c.ShardingSuffixs = func() []string {
+					var suffixes []string
+					for i := 0; i < int(c.NumberOfShards); i++ {
+						suffix, err := c.ShardingAlgorithm(i)
+						if err != nil {
+							return nil
+						}
+						suffixes = append(suffixes, suffix)
 					}
-					suffixes = append(suffixes, suffix)
+					return suffixes
 				}
-				return suffixes
+			case PartitionTypeList:
+				c.ShardingSuffixs = defaultListSuffixes(&c)
 			}
 		}
 
@@ -346,8 +355,14 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 		}
 		s.mutex.Lock()
 		if db.Statement.ConnPool != nil {
-			s.ConnPool = &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s}
-			db.Statement.ConnPool = s.ConnPool
+			if s.globalIndices != nil {
+				// Wrap the connection pool with our global index-aware version
+				db.Statement.ConnPool = NewConnPoolWithGlobalIndex(db.Statement.ConnPool, s)
+			} else {
+				// Use the original connection pool as-is
+				s.ConnPool = &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s}
+				db.Statement.ConnPool = s.ConnPool
+			}
 		}
 		s.mutex.Unlock()
 	}
@@ -359,6 +374,11 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	stQuery = query
 	if len(s.configs) == 0 {
 		return
+	}
+
+	// Skip processing for system queries or explicit nosharding comments
+	if isSystemQuery(query) || strings.Contains(query, "/* nosharding */") {
+		return ftQuery, stQuery, tableName, nil
 	}
 
 	// Parse the SQL query using pg_query_go
@@ -388,9 +408,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	case *pg_query.Node_SelectStmt:
 		isSelect = true
 		selectStmt = stmtNode.SelectStmt
-		if strings.Contains(query, "/* nosharding */") {
-			return ftQuery, stQuery, tableName, nil
-		}
 		tables = collectTablesFromSelect(selectStmt)
 		if selectStmt.WhereClause != nil {
 			conditions = append(conditions, selectStmt.WhereClause)
@@ -404,6 +421,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			hasShardingKey := false
 			for _, table := range tables {
 				if cfg, ok := s.configs[table]; ok {
+
 					shardingKey := cfg.ShardingKey
 					_, _, keyFound, _ := s.extractShardingKeyFromConditions(shardingKey, conditions, args, nil, table)
 					if keyFound {
@@ -415,31 +433,13 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 			// If no sharding key found, we have two options:
 			if !hasShardingKey {
-				// Option 1: Fall back to the main table if DoubleWrite is enabled
-				for _, table := range tables {
-					if cfg, ok := s.configs[table]; ok && cfg.DoubleWrite {
-						return ftQuery, stQuery, tableName, nil
-					}
+				//todo use global index
+				stQuery, err = s.handleCrossShardQuery(query, tables)
+				if err != nil {
+					return ftQuery, stQuery, tableName, err
 				}
-				// Option 2: Query all shards
-				var allQueries []string
-				for _, table := range tables {
-					if cfg, ok := s.configs[table]; ok {
-						suffixes := cfg.ShardingSuffixs()
-						for _, suffix := range suffixes {
-							shardedQuery := query
-							shardedQuery = strings.Replace(shardedQuery, table, table+suffix, -1)
-							allQueries = append(allQueries, shardedQuery)
-						}
-					}
-				}
-
-				if len(allQueries) > 0 {
-					// Create a UNION ALL query combining all shards
-					stQuery = strings.Join(allQueries, " UNION ALL ")
-					return ftQuery, stQuery, tableName, nil
-				}
-
+				s.querys.Store("last_query", stQuery) // Store the query for testing
+				return ftQuery, stQuery, tableName, nil
 			}
 		}
 
@@ -671,11 +671,41 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 	// Initialize a separate knownKeys map for the current table
 	knownKeys := make(map[string]interface{})
 
+	// Get the config for this table
+	config, found := s.configs[currentTable]
+	if !found {
+		return nil, 0, false, fmt.Errorf("no sharding config found for table %s", currentTable)
+	}
+
 	// Iterate through each condition to find the sharding key
 	for _, condition := range conditions {
 		keyFound, value, err = traverseConditionForKey(shardingKey, condition, args, knownKeys, aliasMap)
 		if keyFound || err != nil {
 			break
+		}
+
+		// check for "is_" boolean fields
+		if config.PartitionType == PartitionTypeList {
+			// Check for boolean fields like "is_erc20", "is_erc721", etc.
+			for typeName := range config.ListValues {
+				boolField := "is_" + strings.ToLower(typeName)
+
+				// Check all conditions for this boolean field
+				for _, condition := range conditions {
+					foundBool, boolValue, err := traverseConditionForKey(boolField, condition, args, knownKeys, aliasMap)
+					if err != nil {
+						continue
+					}
+
+					if foundBool {
+						// Check if it's true
+						if bVal, ok := boolValue.(bool); ok && bVal {
+							// Found "is_xxx = true" condition, use the corresponding type
+							return typeName, 0, true, nil
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -683,6 +713,15 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 	if !keyFound {
 		var idFound bool
 		var idValue interface{}
+
+		// For hash partitioning, we can use the ID, but for list partitioning,
+		// we must have the list key to determine the correct partition
+		if config.PartitionType == PartitionTypeList {
+
+			// todo  use global index instead
+			return nil, 0, false, ErrMissingShardingKey
+		}
+
 		for _, condition := range conditions {
 			//log.Println("Traversing condition for 'id'")
 			idFound, idValue, err = traverseConditionForKey("id", condition, args, knownKeys, aliasMap)
@@ -696,6 +735,7 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 				return nil, 0, false, ErrInvalidID
 			}
 			id = idInt64
+			return nil, id, true, nil
 		} else {
 			// Neither sharding key nor 'id' found; return error
 			err = ErrMissingShardingKey
@@ -704,6 +744,197 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 	}
 
 	return value, id, keyFound, err
+}
+
+func (s *Sharding) handleCrossShardQuery(query string, tables []string) (string, error) {
+	// Extract the core parts of the query (SELECT columns, WHERE conditions, etc.)
+	// This avoids duplicating the entire query for each shard
+
+	selectPart, fromPart, wherePart, otherParts, err := extractQueryParts(query)
+	if err != nil {
+		return "", err
+	}
+
+	var unionQueries []string
+
+	// Generate optimized shard-specific queries
+	for _, table := range tables {
+		if cfg, ok := s.configs[table]; ok {
+			suffixes := cfg.ShardingSuffixs()
+			for _, suffix := range suffixes {
+				// Create a more compact query for each shard
+				shardedFromPart := strings.Replace(fromPart, table, table+suffix, -1)
+				shardQuery := fmt.Sprintf("%s %s %s", selectPart, shardedFromPart, wherePart)
+				// Only add other parts (ORDER BY, etc.) to the last query or handle specially
+				unionQueries = append(unionQueries, shardQuery)
+			}
+		}
+	}
+
+	// Make sure we have at least one query
+	if len(unionQueries) == 0 {
+		return query, nil // Fall back to original query if no shards found
+	}
+
+	// Combine with UNION ALL
+	finalQuery := strings.Join(unionQueries, " UNION ALL ")
+
+	// Add any global clauses like ORDER BY, LIMIT at the end
+	if otherParts != "" {
+		finalQuery = fmt.Sprintf("SELECT * FROM (%s) AS combined_results %s", finalQuery, otherParts)
+	}
+
+	return finalQuery, nil
+}
+
+// extractQueryParts parses a SQL query and extracts its major components
+func extractQueryParts(query string) (selectPart, fromPart, wherePart, otherParts string, err error) {
+	// Parse the SQL query using pg_query_go
+	parsed, err := pg_query.Parse(query)
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("error parsing query: %v", err)
+	}
+
+	if len(parsed.Stmts) == 0 {
+		return "", "", "", "", fmt.Errorf("no statements found in query")
+	}
+
+	stmt := parsed.Stmts[0]
+	selectStmt, ok := stmt.Stmt.Node.(*pg_query.Node_SelectStmt)
+	if !ok {
+		return "", "", "", "", fmt.Errorf("statement is not a SELECT")
+	}
+
+	// Extract SELECT part (target list)
+	selectBuilder := &strings.Builder{}
+	selectBuilder.WriteString("SELECT ")
+	for i, target := range selectStmt.SelectStmt.TargetList {
+		if i > 0 {
+			selectBuilder.WriteString(", ")
+		}
+		targetSQL, err := pg_query.Deparse(&pg_query.ParseResult{
+			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: &pg_query.Node_ResTarget{ResTarget: target.GetResTarget()}}}},
+		})
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("error deparsing target: %v", err)
+		}
+		selectBuilder.WriteString(targetSQL)
+	}
+
+	// Extract FROM part
+	fromBuilder := &strings.Builder{}
+	fromBuilder.WriteString("FROM ")
+	for i, from := range selectStmt.SelectStmt.FromClause {
+		if i > 0 {
+			fromBuilder.WriteString(", ")
+		}
+		fromSQL, err := pg_query.Deparse(&pg_query.ParseResult{
+			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: from.Node}}},
+		})
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("error deparsing from: %v", err)
+		}
+		fromBuilder.WriteString(fromSQL)
+	}
+
+	// Extract WHERE part
+	whereBuilder := &strings.Builder{}
+	if selectStmt.SelectStmt.WhereClause != nil {
+		whereBuilder.WriteString("WHERE ")
+		whereSQL, err := pg_query.Deparse(&pg_query.ParseResult{
+			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: selectStmt.SelectStmt.WhereClause.Node}}},
+		})
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("error deparsing where: %v", err)
+		}
+		whereBuilder.WriteString(whereSQL)
+	}
+
+	// Extract other parts (GROUP BY, ORDER BY, LIMIT, etc.)
+	otherBuilder := &strings.Builder{}
+
+	// GROUP BY
+	if len(selectStmt.SelectStmt.GroupClause) > 0 {
+		otherBuilder.WriteString("GROUP BY ")
+		for i, group := range selectStmt.SelectStmt.GroupClause {
+			if i > 0 {
+				otherBuilder.WriteString(", ")
+			}
+			groupSQL, err := pg_query.Deparse(&pg_query.ParseResult{
+				Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: group.Node}}},
+			})
+			if err != nil {
+				return "", "", "", "", fmt.Errorf("error deparsing group by: %v", err)
+			}
+			otherBuilder.WriteString(groupSQL)
+		}
+	}
+
+	// HAVING
+	if selectStmt.SelectStmt.HavingClause != nil {
+		if otherBuilder.Len() > 0 {
+			otherBuilder.WriteString(" ")
+		}
+		otherBuilder.WriteString("HAVING ")
+		havingSQL, err := pg_query.Deparse(&pg_query.ParseResult{
+			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: selectStmt.SelectStmt.HavingClause.Node}}},
+		})
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("error deparsing having: %v", err)
+		}
+		otherBuilder.WriteString(havingSQL)
+	}
+
+	// ORDER BY
+	if len(selectStmt.SelectStmt.SortClause) > 0 {
+		if otherBuilder.Len() > 0 {
+			otherBuilder.WriteString(" ")
+		}
+		otherBuilder.WriteString("ORDER BY ")
+		for i, sort := range selectStmt.SelectStmt.SortClause {
+			if i > 0 {
+				otherBuilder.WriteString(", ")
+			}
+			sortSQL, err := pg_query.Deparse(&pg_query.ParseResult{
+				Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: sort.Node}}},
+			})
+			if err != nil {
+				return "", "", "", "", fmt.Errorf("error deparsing order by: %v", err)
+			}
+			otherBuilder.WriteString(sortSQL)
+		}
+	}
+
+	// LIMIT and OFFSET
+	if selectStmt.SelectStmt.LimitCount != nil {
+		if otherBuilder.Len() > 0 {
+			otherBuilder.WriteString(" ")
+		}
+		otherBuilder.WriteString("LIMIT ")
+		limitSQL, err := pg_query.Deparse(&pg_query.ParseResult{
+			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: selectStmt.SelectStmt.LimitCount.Node}}},
+		})
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("error deparsing limit: %v", err)
+		}
+		otherBuilder.WriteString(limitSQL)
+	}
+
+	if selectStmt.SelectStmt.LimitOffset != nil {
+		if otherBuilder.Len() > 0 {
+			otherBuilder.WriteString(" ")
+		}
+		otherBuilder.WriteString("OFFSET ")
+		offsetSQL, err := pg_query.Deparse(&pg_query.ParseResult{
+			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: selectStmt.SelectStmt.LimitOffset.Node}}},
+		})
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("error deparsing offset: %v", err)
+		}
+		otherBuilder.WriteString(offsetSQL)
+	}
+
+	return selectBuilder.String(), fromBuilder.String(), whereBuilder.String(), otherBuilder.String(), nil
 }
 
 func collectJoinConditions(selectStmt *pg_query.SelectStmt) []*pg_query.Node {
@@ -944,7 +1175,13 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 		}
 	}
 
-	if !keyFound {
+	// For list partitioning, we must have the list key
+	if r.PartitionType == PartitionTypeList && !keyFound {
+		// todo use a global index instead
+		return nil, 0, false, ErrMissingShardingKey
+	}
+
+	if r.PartitionType == PartitionTypeHash && !keyFound {
 		return nil, 0, false, ErrMissingShardingKey
 	}
 
@@ -1191,8 +1428,52 @@ func replaceSelectStmtTableName(selectStmt *pg_query.SelectStmt, tableMap map[st
 		replaceTableNames(sortBy, tableMap)
 	}
 	replaceTableNames(selectStmt.HavingClause, tableMap)
-	for _, groupBy := range selectStmt.GroupClause {
-		replaceTableNames(groupBy, tableMap)
+	if len(selectStmt.GroupClause) > 0 && len(selectStmt.SortClause) > 0 {
+		// Check if we're ordering by a column that's not in GROUP BY
+		for _, sortBy := range selectStmt.SortClause {
+			if sortNode, ok := sortBy.Node.(*pg_query.Node_SortBy); ok {
+				if colRef, ok := sortNode.SortBy.Node.Node.(*pg_query.Node_ColumnRef); ok {
+					// Check if this column is in the GROUP BY
+					colName := extractColumnName(colRef.ColumnRef, nil)
+					inGroupBy := false
+
+					for _, groupBy := range selectStmt.GroupClause {
+						if groupColRef, ok := groupBy.Node.(*pg_query.Node_ColumnRef); ok {
+							groupCol := extractColumnName(groupColRef.ColumnRef, nil)
+							if colName == groupCol {
+								inGroupBy = true
+								break
+							}
+						}
+					}
+
+					// If not in GROUP BY, replace with the first GROUP BY column
+					if !inGroupBy && len(selectStmt.GroupClause) > 0 {
+						if _, ok := selectStmt.GroupClause[0].Node.(*pg_query.Node_ColumnRef); ok {
+							// Replace the ORDER BY column with the GROUP BY column
+							sortNode.SortBy.Node = selectStmt.GroupClause[0]
+						}
+					}
+				}
+			}
+		}
+	}
+	if selectStmt.GroupClause != nil {
+		for _, groupItem := range selectStmt.GroupClause {
+			replaceTableNames(groupItem, tableMap)
+
+			// Specifically check for ColumnRef nodes in GROUP BY
+			if colRef, ok := groupItem.Node.(*pg_query.Node_ColumnRef); ok {
+				for _, field := range colRef.ColumnRef.Fields {
+					if stringNode, ok := field.Node.(*pg_query.Node_String_); ok {
+						// Check if it matches table name
+						if shardedTableName, exists := tableMap[stringNode.String_.Sval]; exists {
+							stringNode.String_.Sval = shardedTableName
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Handle RETURNING clause for INSERT statements
@@ -1331,6 +1612,27 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 				//log.Printf("Processing AExpr: Operator '%s'", opName)
 				//log.Printf("Left Column: '%s', Right Column: '%s'", leftColName, rightColName)
 				//log.Printf("Known Keys: %v", knownKeys)
+			} else {
+				// Check if operation involves sharding key but with non-equality operator
+				var leftColName, rightColName string
+
+				// Left expression
+				if colRef, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_ColumnRef); ok {
+					leftColName = extractColumnName(colRef.ColumnRef, aliasMap)
+					// If sharding key is used with non-equality operator, return error
+					if getColumnNameWithoutTable(leftColName) == shardingKey {
+						return false, nil, ErrMissingShardingKey
+					}
+				}
+
+				// Right expression
+				if colRef, ok := n.AExpr.Rexpr.Node.(*pg_query.Node_ColumnRef); ok {
+					rightColName = extractColumnName(colRef.ColumnRef, aliasMap)
+					// If sharding key is used with non-equality operator, return error
+					if getColumnNameWithoutTable(rightColName) == shardingKey {
+						return false, nil, ErrMissingShardingKey
+					}
+				}
 			}
 
 		}
@@ -1436,22 +1738,35 @@ func extractColumnName(colRef *pg_query.ColumnRef, aliasMap map[string]string) s
 	return strings.Join(parts, ".")
 }
 
-func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err error) {
-	if keyFind {
+func getSuffix(value any, id int64, keyFound bool, r Config) (suffix string, err error) {
+	if keyFound && value != nil {
+		// Use the sharding key value if available
 		suffix, err = r.ShardingAlgorithm(value)
 		if err != nil {
 			log.Printf("Error in ShardingAlgorithm: %v\n", err)
-			return
+
+			// Fall back to ID-based routing if available
+			if id != 0 && r.ShardingAlgorithmByPrimaryKey != nil {
+				suffix = r.ShardingAlgorithmByPrimaryKey(id)
+				log.Printf("Falling back to ID-based routing: %d -> %s\n", id, suffix)
+				return suffix, nil
+			}
+
+			return "", err
 		}
-		//log.Printf("Sharding key value: %v, Suffix: %s\n", value, suffix)
-	} else {
+		log.Printf("Sharding key value: %v, Suffix: %s\n", value, suffix)
+	} else if id != 0 {
+		// Use ID-based routing when no value or value is nil
 		if r.ShardingAlgorithmByPrimaryKey == nil {
-			err = fmt.Errorf("there is not sharding key and ShardingAlgorithmByPrimaryKey is not configured")
+			err = fmt.Errorf("there is no sharding key and ShardingAlgorithmByPrimaryKey is not configured")
 			log.Printf("Error: %v\n", err)
 			return
 		}
 		suffix = r.ShardingAlgorithmByPrimaryKey(id)
-		//log.Printf("Sharding by primary key: %d, Suffix: %s\n", id, suffix)
+		log.Printf("Sharding by primary key: %d, Suffix: %s\n", id, suffix)
+	} else {
+		err = ErrMissingShardingKey
+		return
 	}
 	return
 }
@@ -1536,4 +1851,155 @@ func isSystemQuery(query string) bool {
 		}
 	}
 	return false
+}
+
+// Function to generate all suffixes for list partitioning
+func defaultListSuffixes(config *Config) func() []string {
+	return func() []string {
+		// Find the maximum partition number
+		maxPartition := -1
+		for _, partNum := range config.ListValues {
+			if partNum > maxPartition {
+				maxPartition = partNum
+			}
+		}
+
+		// Include default partition if specified
+		if config.DefaultPartition > maxPartition {
+			maxPartition = config.DefaultPartition
+		}
+
+		// Generate all suffixes
+		suffixes := make([]string, maxPartition+1)
+		for i := 0; i <= maxPartition; i++ {
+			suffixes[i] = fmt.Sprintf(config.tableFormat, i)
+		}
+
+		return suffixes
+	}
+}
+
+// Function to create a list partitioning algorithm based on config
+func defaultListAlgorithm(config *Config) func(value any) (string, error) {
+	return func(value any) (string, error) {
+		// For nil or zero value, use default partition if specified
+		if value == nil {
+			if config.DefaultPartition >= 0 {
+				return fmt.Sprintf(config.tableFormat, config.DefaultPartition), nil
+			}
+			return "", fmt.Errorf("nil value not found in partition list")
+		}
+
+		// Convert value to string for lookup in ListValues
+		var strValue string
+		switch v := value.(type) {
+		case string:
+			strValue = v
+		case []byte:
+			strValue = string(v)
+		case int:
+			strValue = fmt.Sprintf("%d", v)
+		case int64:
+			strValue = fmt.Sprintf("%d", v)
+		case int32:
+			strValue = fmt.Sprintf("%d", v)
+		case int16:
+			strValue = fmt.Sprintf("%d", v)
+		case int8:
+			strValue = fmt.Sprintf("%d", v)
+		case uint:
+			strValue = fmt.Sprintf("%d", v)
+		case uint64:
+			strValue = fmt.Sprintf("%d", v)
+		case uint32:
+			strValue = fmt.Sprintf("%d", v)
+		case uint16:
+			strValue = fmt.Sprintf("%d", v)
+		case uint8:
+			strValue = fmt.Sprintf("%d", v)
+		case bool:
+			strValue = fmt.Sprintf("%t", v)
+		default:
+			// Try using reflection to get string representation
+			if reflect.ValueOf(v).Kind() == reflect.String {
+				strValue = reflect.ValueOf(v).String()
+			} else {
+				strValue = fmt.Sprintf("%v", v)
+			}
+		}
+
+		// Debug log the exact value being looked up
+		log.Printf("Looking up partition for value: '%s' in ListValues map: %v", strValue, config.ListValues)
+
+		// Look up partition number in ListValues map
+		partitionNum, exists := config.ListValues[strValue]
+		if !exists {
+			// Try looking up with different case variations if first attempt fails
+			for key, val := range config.ListValues {
+				if strings.EqualFold(key, strValue) {
+					partitionNum = val
+					exists = true
+					log.Printf("Found partition %d for case-insensitive value '%s' matching key '%s'", partitionNum, strValue, key)
+					break
+				}
+			}
+
+			// If still not found, use default partition if specified, otherwise error
+			if !exists {
+				if config.DefaultPartition >= 0 {
+					partitionNum = config.DefaultPartition
+					log.Printf("Using default partition %d for value '%s'", partitionNum, strValue)
+				} else {
+					return "", fmt.Errorf("value '%s' not found in partition list", strValue)
+				}
+			}
+		} else {
+			log.Printf("Found partition %d for value '%s'", partitionNum, strValue)
+		}
+
+		return fmt.Sprintf(config.tableFormat, partitionNum), nil
+	}
+}
+
+// Function to create a default hash partitioning algorithm based on config
+func defaultHashAlgorithm(config *Config) func(value any) (string, error) {
+	return func(value any) (string, error) {
+		id := 0
+		switch v := value.(type) {
+		case int:
+			id = v
+		case int64:
+			id = int(v)
+		case int32:
+			id = int(v)
+		case int16:
+			id = int(v)
+		case int8:
+			id = int(v)
+		case uint:
+			id = int(v)
+		case uint64:
+			id = int(v)
+		case uint32:
+			id = int(v)
+		case uint16:
+			id = int(v)
+		case uint8:
+			id = int(v)
+		case float64:
+			id = int(v)
+		case float32:
+			id = int(v)
+		case string:
+			var err error
+			id, err = strconv.Atoi(v)
+			if err != nil {
+				id = int(crc32.ChecksumIEEE([]byte(v)))
+			}
+		default:
+			return "", fmt.Errorf("default algorithm only supports integer and string types")
+		}
+
+		return fmt.Sprintf(config.tableFormat, id%int(config.NumberOfShards)), nil
+	}
 }
