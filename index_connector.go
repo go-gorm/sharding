@@ -1,11 +1,7 @@
 package sharding
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
-	"gorm.io/gorm"
-	"log"
 	"regexp"
 	"strings"
 
@@ -15,86 +11,6 @@ import (
 // GlobalIndexConnector handles the integration between global index and the main sharding module
 type GlobalIndexConnector struct {
 	sharding *Sharding
-}
-
-// NewGlobalIndexConnector creates a new connector
-func NewGlobalIndexConnector(s *Sharding) *GlobalIndexConnector {
-	return &GlobalIndexConnector{
-		sharding: s,
-	}
-}
-
-// ConnPoolWithGlobalIndex extends ConnPool with global index capabilities
-type ConnPoolWithGlobalIndex struct {
-	connPool  gorm.ConnPool
-	connector *GlobalIndexConnector
-}
-
-func (cp *ConnPoolWithGlobalIndex) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
-	// Check if this query can use global index
-	newQuery, newArgs, useGlobalIndex := cp.connector.processQuery(query, args)
-	if useGlobalIndex {
-		return cp.connPool.QueryContext(ctx, newQuery, newArgs...)
-	}
-	return cp.connPool.QueryContext(ctx, query, args...)
-}
-
-// ExecContext overrides the ConnPool ExecContext method to use global indices
-func (cp *ConnPoolWithGlobalIndex) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	// Check if this query can use global index
-	newQuery, newArgs, useGlobalIndex := cp.connector.processQuery(query, args)
-	if useGlobalIndex {
-		return cp.connPool.ExecContext(ctx, newQuery, newArgs...)
-	}
-	return cp.connPool.ExecContext(ctx, query, args...)
-}
-
-// QueryRowContext overrides the ConnPool QueryRowContext method to use global indices
-func (cp *ConnPoolWithGlobalIndex) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
-	// Check if this query can use global index
-	newQuery, newArgs, useGlobalIndex := cp.connector.processQuery(query, args)
-	if useGlobalIndex {
-		return cp.connPool.QueryRowContext(ctx, newQuery, newArgs...)
-	}
-	return cp.connPool.QueryRowContext(ctx, query, args...)
-}
-
-// PrepareContext passes through to the original ConnPool
-func (cp *ConnPoolWithGlobalIndex) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
-	return cp.connPool.PrepareContext(ctx, query)
-}
-
-// processQuery checks if a query can use the global index and modifies it if needed
-func (gic *GlobalIndexConnector) processQuery(query string, args []interface{}) (string, []interface{}, bool) {
-	// Skip if sharding ignore flag is set
-	if strings.Contains(query, "/* nosharding */") || strings.Contains(query, "/* noglobalindex */") {
-		return query, args, false
-	}
-
-	// Skip modification for system queries or DDL statements
-	if isSystemQuery(query) || isDefinitionQuery(query) {
-		return query, args, false
-	}
-
-	// Try to extract table and conditions
-	tableName, conditions, err := gic.extractQueryInfo(query, args)
-	if err != nil || tableName == "" {
-		return query, args, false
-	}
-
-	// Check if any condition can use a global index
-	for _, cond := range conditions {
-		if index := gic.findGlobalIndexForColumn(tableName, cond.Column); index != nil {
-			// Found a global index we can use
-			newQuery, newArgs, err := gic.rewriteQueryWithGlobalIndex(index, query, cond, args)
-			if err == nil {
-				return newQuery, newArgs, true
-			}
-			log.Printf("Error rewriting query with global index: %v", err)
-		}
-	}
-
-	return query, args, false
 }
 
 // QueryCondition represents a condition in a SQL query
@@ -366,12 +282,4 @@ func (gic *GlobalIndexConnector) rewriteQueryWithGlobalIndex(gi *GlobalIndex, qu
 	// Combine with UNION ALL
 	finalQuery := strings.Join(subQueries, " UNION ALL ") + " /* noglobalindex */"
 	return finalQuery, newArgs, nil
-}
-
-// NewConnPoolWithGlobalIndex creates a new ConnPool with global index support
-func NewConnPoolWithGlobalIndex(original gorm.ConnPool, s *Sharding) *ConnPoolWithGlobalIndex {
-	return &ConnPoolWithGlobalIndex{
-		connPool:  original,
-		connector: NewGlobalIndexConnector(s),
-	}
 }

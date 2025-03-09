@@ -52,15 +52,15 @@ func (r *GlobalIndexRegistry) Get(tableName, columnName string) *GlobalIndex {
 	return tableIndices[columnName]
 }
 
-// GlobalIndex manages a global index across all table partitions
-type GlobalIndex struct {
-	sync.RWMutex
-	DB           *gorm.DB
-	TableName    string   // Base table name (without partition suffix)
-	IndexColumns []string // Columns to be indexed
-	Config       Config   // The sharding configuration for this table
-	AutoRebuild  bool     // Whether to automatically rebuild the index when it's outdated
-}
+//// GlobalIndex manages a global index across all table partitions
+//type GlobalIndex struct {
+//	sync.RWMutex
+//	DB           *gorm.DB
+//	TableName    string   // Base table name (without partition suffix)
+//	IndexColumns []string // Columns to be indexed
+//	Config       Config   // The sharding configuration for this table
+//	AutoRebuild  bool     // Whether to automatically rebuild the index when it's outdated
+//}
 
 // GlobalIndexRecord represents a record in the global index table
 type GlobalIndexRecord struct {

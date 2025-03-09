@@ -940,12 +940,12 @@ func extractQueryParts(query string) (selectPart, fromPart, wherePart, otherPart
 func collectJoinConditions(selectStmt *pg_query.SelectStmt) []*pg_query.Node {
 	var conditions []*pg_query.Node
 	for _, fromItem := range selectStmt.FromClause {
-		conditions = append(conditions, extractConditionsFromNode(fromItem)...)
+		conditions = append(conditions, extractSpecialConditionsFromNode(fromItem)...)
 	}
 	return conditions
 }
 
-func extractConditionsFromNode(node *pg_query.Node) []*pg_query.Node {
+func extractSpecialConditionsFromNode(node *pg_query.Node) []*pg_query.Node {
 	var conditions []*pg_query.Node
 	switch n := node.Node.(type) {
 	case *pg_query.Node_JoinExpr:
@@ -953,8 +953,8 @@ func extractConditionsFromNode(node *pg_query.Node) []*pg_query.Node {
 			conditions = append(conditions, n.JoinExpr.Quals)
 		}
 		// Recursively extract from left and right arguments
-		conditions = append(conditions, extractConditionsFromNode(n.JoinExpr.Larg)...)
-		conditions = append(conditions, extractConditionsFromNode(n.JoinExpr.Rarg)...)
+		conditions = append(conditions, extractSpecialConditionsFromNode(n.JoinExpr.Larg)...)
+		conditions = append(conditions, extractSpecialConditionsFromNode(n.JoinExpr.Rarg)...)
 	case *pg_query.Node_RangeSubselect:
 		if subselect, ok := n.RangeSubselect.Subquery.Node.(*pg_query.Node_SelectStmt); ok {
 			conditions = append(conditions, collectConditionsFromSelect(subselect.SelectStmt)...)

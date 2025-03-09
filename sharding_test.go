@@ -494,6 +494,7 @@ func dropTables() {
 		dbNoID.Exec("DROP TABLE IF EXISTS " + table)
 		dbRead.Exec("DROP TABLE IF EXISTS " + table)
 		dbWrite.Exec("DROP TABLE IF EXISTS " + table)
+		dbList.Exec("DROP TABLE IF EXISTS " + table)
 		if mysqlDialector() {
 			db.Exec(("DROP TABLE IF EXISTS gorm_sharding_" + table + "_id_seq"))
 		} else {
@@ -705,7 +706,7 @@ func TestPKSnowflake(t *testing.T) {
 
 	node, _ := snowflake.NewNode(0)
 	sfid := node.Generate().Int64()
-	expected := fmt.Sprintf(`INSERT INTO orders_0 ("user_id", "product", "category_id", id) VALUES ($1, $2, $3, %d`, sfid)[0:68]
+	expected := fmt.Sprintf(`INSERT INTO orders_0 (user_id, product, category_id, id) VALUES ($1, $2, $3, %d`, sfid)[0:68]
 	expected = toDialect(expected)
 
 	db.Create(&Order{UserID: 100, Product: "iPhone", CategoryID: 1})
@@ -726,7 +727,7 @@ func TestPKPGSequence(t *testing.T) {
 
 	db.Exec("SELECT setval('" + pgSeqName("orders") + "', 42)")
 	db.Create(&Order{UserID: 100, Product: "iPhone", CategoryID: 1})
-	expected := `INSERT INTO orders_0 ("user_id", "product", "category_id", id) VALUES ($1, $2, $3, 43) RETURNING "id"`
+	expected := `INSERT INTO orders_0 (user_id, product, category_id, id) VALUES ($1, $2, $3, 43) RETURNING id`
 	assert.Equal(t, expected, middleware.LastQuery())
 }
 
