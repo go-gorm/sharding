@@ -369,10 +369,12 @@ func (m *IndexMaintenanceManager) incrementalRebuild(gi *GlobalIndex, task *Inde
 		}
 
 		// Find records updated since last index update
-		// Note: This requires that your tables have updated_at column
+		// Note: This requires that tables have updated_at column
 		var query *gorm.DB
 		if lastUpdateTime > 0 {
-			query = gi.DB.Table(tableName).Where("updated_at > ?", lastUpdateTime)
+			// Convert Unix timestamp to time.Time
+			updateTime := time.Unix(lastUpdateTime, 0)
+			query = gi.DB.Table(tableName).Where("updated_at > ?", updateTime)
 		} else {
 			query = gi.DB.Table(tableName)
 		}

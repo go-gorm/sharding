@@ -43,6 +43,7 @@ type Sharding struct {
 	querys         sync.Map
 	snowflakeNodes []*snowflake.Node
 	globalIndices  *GlobalIndexRegistry
+	queryRewriter  *QueryRewriter
 
 	_config Config
 	_tables []any
@@ -145,6 +146,12 @@ func Register(config interface{}, tables ...interface{}) *Sharding {
 	default:
 		panic("Invalid config type")
 	}
+
+	// Create an empty GlobalIndexRegistry
+	s.globalIndices = &GlobalIndexRegistry{
+		indices: make(map[string]map[string]*GlobalIndex),
+	}
+
 	return s
 }
 
@@ -332,7 +339,15 @@ func (s *Sharding) Initialize(db *gorm.DB) error {
 		s.snowflakeNodes[i] = n
 	}
 
-	return s.compile()
+	err := s.compile()
+	if err != nil {
+		return err
+	}
+
+	// Initialize the query rewriter with default options
+	s.queryRewriter = NewQueryRewriter(s, DefaultQueryRewriteOptions())
+
+	return nil
 }
 
 func (s *Sharding) registerCallbacks(db *gorm.DB) {
@@ -421,7 +436,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			hasShardingKey := false
 			for _, table := range tables {
 				if cfg, ok := s.configs[table]; ok {
-
 					shardingKey := cfg.ShardingKey
 					_, _, keyFound, _ := s.extractShardingKeyFromConditions(shardingKey, conditions, args, nil, table)
 					if keyFound {
@@ -431,15 +445,17 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 				}
 			}
 
-			// If no sharding key found, we have two options:
+			// If no sharding key found
 			if !hasShardingKey {
-				//todo use global index
-				stQuery, err = s.handleCrossShardQuery(query, tables)
-				if err != nil {
-					return ftQuery, stQuery, tableName, err
+				// Check if any of the tables have DoubleWrite enabled
+				for _, table := range tables {
+					if cfg, ok := s.configs[table]; ok && cfg.DoubleWrite {
+						// Return the original query for the main table, no error
+						return ftQuery, ftQuery, table, nil
+					}
 				}
-				s.querys.Store("last_query", stQuery) // Store the query for testing
-				return ftQuery, stQuery, tableName, nil
+				// No DoubleWrite enabled, return error
+				return ftQuery, stQuery, "", errors.New("no sharding key found")
 			}
 		}
 
@@ -450,28 +466,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			// Get base table name
 			baseTable := insertStmt.Relation.Relname
 			tables = []string{baseTable}
-
-			// Update table name immediately to ensure RETURNING clause uses correct table
-			if shardedName, exists := tableMap[baseTable]; exists {
-				insertStmt.Relation.Relname = shardedName
-
-				// Also update any RETURNING clauses to use sharded table name
-				if insertStmt.ReturningList != nil {
-					for _, returningItem := range insertStmt.ReturningList {
-						if resTarget, ok := returningItem.Node.(*pg_query.Node_ResTarget); ok {
-							if colRef, ok := resTarget.ResTarget.Val.Node.(*pg_query.Node_ColumnRef); ok {
-								if len(colRef.ColumnRef.Fields) > 0 {
-									if stringNode, ok := colRef.ColumnRef.Fields[0].Node.(*pg_query.Node_String_); ok {
-										if stringNode.String_.Sval == baseTable {
-											stringNode.String_.Sval = shardedName
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
+			tableName = baseTable
 		} else {
 			return ftQuery, stQuery, tableName, fmt.Errorf("unexpected node type in InsertStmt.Relation")
 		}
@@ -479,6 +474,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		updateStmt := stmtNode.UpdateStmt
 		if updateStmt.Relation != nil {
 			tables = []string{updateStmt.Relation.Relname}
+			tableName = updateStmt.Relation.Relname
 			if updateStmt.WhereClause != nil {
 				conditions = append(conditions, updateStmt.WhereClause)
 			}
@@ -489,6 +485,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		deleteStmt := stmtNode.DeleteStmt
 		if deleteStmt.Relation != nil {
 			tables = []string{deleteStmt.Relation.Relname}
+			tableName = deleteStmt.Relation.Relname
 			if deleteStmt.WhereClause != nil {
 				conditions = append(conditions, deleteStmt.WhereClause)
 			}
@@ -513,18 +510,18 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	// Iterate through each table to determine its sharded name
 	for _, originalTableName := range tables {
 		schemaName := ""
-		tableName = originalTableName
+		localTableName := originalTableName
 
 		// Check for schema-qualified table names
 		if strings.Contains(originalTableName, ".") {
 			parts := strings.SplitN(originalTableName, ".", 2)
 			schemaName = parts[0]
-			tableName = parts[1]
+			localTableName = parts[1]
 		}
 
-		fullTableName := tableName
+		fullTableName := localTableName
 		if schemaName != "" {
-			fullTableName = fmt.Sprintf("%s.%s", schemaName, tableName)
+			fullTableName = fmt.Sprintf("%s.%s", schemaName, localTableName)
 		}
 
 		r, ok := s.configs[fullTableName]
@@ -552,12 +549,21 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 				for _, valuesList := range valuesSelect.ValuesLists {
 					value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
 					if err != nil {
+						// Check if DoubleWrite is enabled for this table
+						if r.DoubleWrite {
+							// Return the original query for the main table, no error
+							return ftQuery, ftQuery, tableName, nil
+						}
 						return ftQuery, stQuery, tableName, err
 					}
-					//log.Printf("Extracted sharding key: %v, id: %d, keyFound: %v\n", value, id, keyFound)
 
 					currentSuffix, err := getSuffix(value, id, keyFound, r)
 					if err != nil {
+						// Check if DoubleWrite is enabled for this table
+						if r.DoubleWrite {
+							// Return the original query for the main table, no error
+							return ftQuery, ftQuery, tableName, nil
+						}
 						return ftQuery, stQuery, tableName, err
 					}
 
@@ -565,6 +571,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 					// If more than one unique suffix is found, return an error
 					if len(suffixes) > 1 {
+						// Even with DoubleWrite, we can't insert into different shards in one query
 						return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
 					}
 
@@ -580,12 +587,21 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 				for _, valuesList := range insertStmt.ReturningList {
 					value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
 					if err != nil {
+						// Check if DoubleWrite is enabled
+						if r.DoubleWrite {
+							// Return the original query for main table, no error
+							return ftQuery, ftQuery, tableName, nil
+						}
 						return ftQuery, stQuery, tableName, err
 					}
-					//log.Printf("Extracted sharding key: %v, id: %d, keyFound: %v\n", value, id, keyFound)
 
 					currentSuffix, err := getSuffix(value, id, keyFound, r)
 					if err != nil {
+						// Check if DoubleWrite is enabled
+						if r.DoubleWrite {
+							// Return the original query for main table, no error
+							return ftQuery, ftQuery, tableName, nil
+						}
 						return ftQuery, stQuery, tableName, err
 					}
 
@@ -593,6 +609,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 					// If more than one unique suffix is found, return an error
 					if len(suffixes) > 1 {
+						// Even with DoubleWrite, we can't insert into different shards in one query
 						return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
 					}
 
@@ -605,6 +622,11 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			if len(suffixes) == 1 {
 				suffix = consistentSuffix
 			} else {
+				// Check if DoubleWrite is enabled
+				if r.DoubleWrite {
+					// Return the original query for main table, no error
+					return ftQuery, ftQuery, tableName, nil
+				}
 				return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
 			}
 
@@ -614,7 +636,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			// Update the table name in the insert statement
 			if insertStmt.Relation != nil {
 				insertStmt.Relation.Relname = shardedTableName
-				//log.Printf("Updated table name to '%s'\n", shardedTableName)
 
 				// Now handle ID generation with args
 				err := s.assignIDToInsert(insertStmt, r, &args)
@@ -637,14 +658,22 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			// Extract sharding key for the current table
 			value, id, keyFound, err := s.extractShardingKeyFromConditions(shardingKey, conditions, args, aliasMap, fullTableName)
 			if err != nil {
-				log.Printf("Error extracting sharding key for table '%s': %v\n", originalTableName, err)
+				// Check if DoubleWrite is enabled
+				if r.DoubleWrite {
+					// Return the original query for main table, no error
+					return ftQuery, ftQuery, tableName, nil
+				}
 				return ftQuery, stQuery, tableName, err
 			}
 
 			// Determine the suffix based on the sharding key
 			suffix, err = getSuffix(value, id, keyFound, r)
 			if err != nil {
-				log.Printf("Error determining suffix for table '%s': %v\n", originalTableName, err)
+				// Check if DoubleWrite is enabled
+				if r.DoubleWrite {
+					// Return the original query for main table, no error
+					return ftQuery, ftQuery, tableName, nil
+				}
 				return ftQuery, stQuery, tableName, err
 			}
 
@@ -744,197 +773,6 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 	}
 
 	return value, id, keyFound, err
-}
-
-func (s *Sharding) handleCrossShardQuery(query string, tables []string) (string, error) {
-	// Extract the core parts of the query (SELECT columns, WHERE conditions, etc.)
-	// This avoids duplicating the entire query for each shard
-
-	selectPart, fromPart, wherePart, otherParts, err := extractQueryParts(query)
-	if err != nil {
-		return "", err
-	}
-
-	var unionQueries []string
-
-	// Generate optimized shard-specific queries
-	for _, table := range tables {
-		if cfg, ok := s.configs[table]; ok {
-			suffixes := cfg.ShardingSuffixs()
-			for _, suffix := range suffixes {
-				// Create a more compact query for each shard
-				shardedFromPart := strings.Replace(fromPart, table, table+suffix, -1)
-				shardQuery := fmt.Sprintf("%s %s %s", selectPart, shardedFromPart, wherePart)
-				// Only add other parts (ORDER BY, etc.) to the last query or handle specially
-				unionQueries = append(unionQueries, shardQuery)
-			}
-		}
-	}
-
-	// Make sure we have at least one query
-	if len(unionQueries) == 0 {
-		return query, nil // Fall back to original query if no shards found
-	}
-
-	// Combine with UNION ALL
-	finalQuery := strings.Join(unionQueries, " UNION ALL ")
-
-	// Add any global clauses like ORDER BY, LIMIT at the end
-	if otherParts != "" {
-		finalQuery = fmt.Sprintf("SELECT * FROM (%s) AS combined_results %s", finalQuery, otherParts)
-	}
-
-	return finalQuery, nil
-}
-
-// extractQueryParts parses a SQL query and extracts its major components
-func extractQueryParts(query string) (selectPart, fromPart, wherePart, otherParts string, err error) {
-	// Parse the SQL query using pg_query_go
-	parsed, err := pg_query.Parse(query)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("error parsing query: %v", err)
-	}
-
-	if len(parsed.Stmts) == 0 {
-		return "", "", "", "", fmt.Errorf("no statements found in query")
-	}
-
-	stmt := parsed.Stmts[0]
-	selectStmt, ok := stmt.Stmt.Node.(*pg_query.Node_SelectStmt)
-	if !ok {
-		return "", "", "", "", fmt.Errorf("statement is not a SELECT")
-	}
-
-	// Extract SELECT part (target list)
-	selectBuilder := &strings.Builder{}
-	selectBuilder.WriteString("SELECT ")
-	for i, target := range selectStmt.SelectStmt.TargetList {
-		if i > 0 {
-			selectBuilder.WriteString(", ")
-		}
-		targetSQL, err := pg_query.Deparse(&pg_query.ParseResult{
-			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: &pg_query.Node_ResTarget{ResTarget: target.GetResTarget()}}}},
-		})
-		if err != nil {
-			return "", "", "", "", fmt.Errorf("error deparsing target: %v", err)
-		}
-		selectBuilder.WriteString(targetSQL)
-	}
-
-	// Extract FROM part
-	fromBuilder := &strings.Builder{}
-	fromBuilder.WriteString("FROM ")
-	for i, from := range selectStmt.SelectStmt.FromClause {
-		if i > 0 {
-			fromBuilder.WriteString(", ")
-		}
-		fromSQL, err := pg_query.Deparse(&pg_query.ParseResult{
-			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: from.Node}}},
-		})
-		if err != nil {
-			return "", "", "", "", fmt.Errorf("error deparsing from: %v", err)
-		}
-		fromBuilder.WriteString(fromSQL)
-	}
-
-	// Extract WHERE part
-	whereBuilder := &strings.Builder{}
-	if selectStmt.SelectStmt.WhereClause != nil {
-		whereBuilder.WriteString("WHERE ")
-		whereSQL, err := pg_query.Deparse(&pg_query.ParseResult{
-			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: selectStmt.SelectStmt.WhereClause.Node}}},
-		})
-		if err != nil {
-			return "", "", "", "", fmt.Errorf("error deparsing where: %v", err)
-		}
-		whereBuilder.WriteString(whereSQL)
-	}
-
-	// Extract other parts (GROUP BY, ORDER BY, LIMIT, etc.)
-	otherBuilder := &strings.Builder{}
-
-	// GROUP BY
-	if len(selectStmt.SelectStmt.GroupClause) > 0 {
-		otherBuilder.WriteString("GROUP BY ")
-		for i, group := range selectStmt.SelectStmt.GroupClause {
-			if i > 0 {
-				otherBuilder.WriteString(", ")
-			}
-			groupSQL, err := pg_query.Deparse(&pg_query.ParseResult{
-				Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: group.Node}}},
-			})
-			if err != nil {
-				return "", "", "", "", fmt.Errorf("error deparsing group by: %v", err)
-			}
-			otherBuilder.WriteString(groupSQL)
-		}
-	}
-
-	// HAVING
-	if selectStmt.SelectStmt.HavingClause != nil {
-		if otherBuilder.Len() > 0 {
-			otherBuilder.WriteString(" ")
-		}
-		otherBuilder.WriteString("HAVING ")
-		havingSQL, err := pg_query.Deparse(&pg_query.ParseResult{
-			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: selectStmt.SelectStmt.HavingClause.Node}}},
-		})
-		if err != nil {
-			return "", "", "", "", fmt.Errorf("error deparsing having: %v", err)
-		}
-		otherBuilder.WriteString(havingSQL)
-	}
-
-	// ORDER BY
-	if len(selectStmt.SelectStmt.SortClause) > 0 {
-		if otherBuilder.Len() > 0 {
-			otherBuilder.WriteString(" ")
-		}
-		otherBuilder.WriteString("ORDER BY ")
-		for i, sort := range selectStmt.SelectStmt.SortClause {
-			if i > 0 {
-				otherBuilder.WriteString(", ")
-			}
-			sortSQL, err := pg_query.Deparse(&pg_query.ParseResult{
-				Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: sort.Node}}},
-			})
-			if err != nil {
-				return "", "", "", "", fmt.Errorf("error deparsing order by: %v", err)
-			}
-			otherBuilder.WriteString(sortSQL)
-		}
-	}
-
-	// LIMIT and OFFSET
-	if selectStmt.SelectStmt.LimitCount != nil {
-		if otherBuilder.Len() > 0 {
-			otherBuilder.WriteString(" ")
-		}
-		otherBuilder.WriteString("LIMIT ")
-		limitSQL, err := pg_query.Deparse(&pg_query.ParseResult{
-			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: selectStmt.SelectStmt.LimitCount.Node}}},
-		})
-		if err != nil {
-			return "", "", "", "", fmt.Errorf("error deparsing limit: %v", err)
-		}
-		otherBuilder.WriteString(limitSQL)
-	}
-
-	if selectStmt.SelectStmt.LimitOffset != nil {
-		if otherBuilder.Len() > 0 {
-			otherBuilder.WriteString(" ")
-		}
-		otherBuilder.WriteString("OFFSET ")
-		offsetSQL, err := pg_query.Deparse(&pg_query.ParseResult{
-			Stmts: []*pg_query.RawStmt{{Stmt: &pg_query.Node{Node: selectStmt.SelectStmt.LimitOffset.Node}}},
-		})
-		if err != nil {
-			return "", "", "", "", fmt.Errorf("error deparsing offset: %v", err)
-		}
-		otherBuilder.WriteString(offsetSQL)
-	}
-
-	return selectBuilder.String(), fromBuilder.String(), whereBuilder.String(), otherBuilder.String(), nil
 }
 
 func collectJoinConditions(selectStmt *pg_query.SelectStmt) []*pg_query.Node {

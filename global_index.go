@@ -40,7 +40,7 @@ func DefaultGlobalIndexOptions() GlobalIndexOptions {
 		RebuildThreshold: 10,
 		EnableMetrics:    true,
 		BatchSize:        500,
-		AsyncUpdates:     true,
+		AsyncUpdates:     false, // Use synchronous updates by default for reliability
 	}
 }
 
@@ -88,6 +88,7 @@ func (s *Sharding) InitGlobalIndices() error {
 
 // EnableGlobalIndex enables global indexing for an existing sharding config
 func (s *Sharding) EnableGlobalIndex(tableName string, columns []string, options ...GlobalIndexOptions) error {
+	// Initialize global indices if needed
 	if s.globalIndices == nil {
 		if err := s.InitGlobalIndices(); err != nil {
 			return err
@@ -118,20 +119,24 @@ func (s *Sharding) EnableGlobalIndex(tableName string, columns []string, options
 		metrics:      &GlobalIndexMetrics{},
 	}
 
+	// Register callbacks to maintain the index
+	s.registerIndexCallbacks(gi, s.DB)
+
 	// Register the global index
 	for _, col := range columns {
 		s.globalIndices.Add(tableName, col, gi)
 	}
 
-	// Schedule initial build of the index (can be done asynchronously)
+	// Schedule initial build of the index
+	ctx := context.Background()
 	if opts.AsyncUpdates {
 		go func() {
-			if err := gi.RebuildIndex(context.Background()); err != nil {
+			if err := gi.RebuildIndex(ctx); err != nil {
 				log.Printf("Error during initial index build for table %s: %v", tableName, err)
 			}
 		}()
 	} else {
-		if err := gi.RebuildIndex(context.Background()); err != nil {
+		if err := gi.RebuildIndex(ctx); err != nil {
 			return fmt.Errorf("failed to build initial index: %w", err)
 		}
 	}
@@ -154,7 +159,6 @@ type GlobalIndex struct {
 // OptimizeQueryWithGlobalIndex rewrites a query to use the global index
 func (s *Sharding) OptimizeQueryWithGlobalIndex(query string, args []interface{}) (string, []interface{}, bool) {
 	// Skip optimization for specific query types
-	// todo put this as a resolver
 	if isSystemQuery(query) || strings.Contains(query, "/* nosharding */") || strings.Contains(query, "/* noglobalindex */") {
 		return query, args, false
 	}
@@ -162,6 +166,7 @@ func (s *Sharding) OptimizeQueryWithGlobalIndex(query string, args []interface{}
 	// Parse the query
 	parsed, err := pg_query.Parse(query)
 	if err != nil {
+		log.Printf("Error parsing query: %v", err)
 		return query, args, false
 	}
 
@@ -172,70 +177,97 @@ func (s *Sharding) OptimizeQueryWithGlobalIndex(query string, args []interface{}
 	// Extract the table and where conditions
 	stmt := parsed.Stmts[0]
 	var tableName string
-	var conditions []*pg_query.Node
+	var whereNode *pg_query.Node
+	var shardKeyCondition *IndexableCondition
 
 	switch node := stmt.Stmt.Node.(type) {
 	case *pg_query.Node_SelectStmt:
 		selectStmt := node.SelectStmt
-
-		// Get table name from FROM clause
 		if len(selectStmt.FromClause) > 0 {
 			if rangeVar, ok := selectStmt.FromClause[0].Node.(*pg_query.Node_RangeVar); ok {
 				tableName = rangeVar.RangeVar.Relname
 			}
 		}
-
-		// Get conditions from WHERE clause
-		if selectStmt.WhereClause != nil {
-			conditions = append(conditions, selectStmt.WhereClause)
-		}
+		whereNode = selectStmt.WhereClause
 
 	case *pg_query.Node_UpdateStmt:
 		updateStmt := node.UpdateStmt
 		if updateStmt.Relation != nil {
 			tableName = updateStmt.Relation.Relname
 		}
-		if updateStmt.WhereClause != nil {
-			conditions = append(conditions, updateStmt.WhereClause)
-		}
+		whereNode = updateStmt.WhereClause
 
 	case *pg_query.Node_DeleteStmt:
 		deleteStmt := node.DeleteStmt
 		if deleteStmt.Relation != nil {
 			tableName = deleteStmt.Relation.Relname
 		}
-		if deleteStmt.WhereClause != nil {
-			conditions = append(conditions, deleteStmt.WhereClause)
-		}
+		whereNode = deleteStmt.WhereClause
 
 	default:
-		// Unsupported statement type
 		return query, args, false
 	}
 
-	// Check if this table is configured for sharding
-	_, exists := s.configs[tableName]
-	if !exists || tableName == "" {
+	// Check if table is configured for sharding and has global indices
+	config, exists := s.configs[tableName]
+	if !exists || s.globalIndices == nil {
 		return query, args, false
 	}
 
-	// Check if we have global indices for this table
-	if s.globalIndices == nil {
+	// Extract condition columns
+	if whereNode == nil {
 		return query, args, false
 	}
 
-	// Extract condition columns and values
-	for _, condNode := range conditions {
-		// Check if any of the conditions match a column with a global index
-		queryColumns := extractConditionColumns(condNode)
+	// Extract all conditions
+	conditions := extractConditionsFromNode(whereNode, args)
 
-		for _, col := range queryColumns {
-			// If column has a global index
-			if gi := s.globalIndices.Get(tableName, col); gi != nil {
-				// Try to rewrite query using this global index
-				modifiedQuery, modifiedArgs, err := gi.RewriteQueryWithIndex(query, args, col)
+	// Check if we have the sharding key in our conditions
+	shardingKey := config.ShardingKey
+	for _, cond := range conditions {
+		if cond.Column == shardingKey {
+			// If we have the sharding key, we don't need to use the global index
+			// as we can route directly to the correct shard
+			shardKeyCondition = cond
+			break
+		}
+	}
+
+	// If we have a sharding key condition, don't use the global index
+	if shardKeyCondition != nil {
+		return query, args, false
+	}
+
+	// Find conditions that can use the global index
+	var indexableColumns []string
+	for _, cond := range conditions {
+		if gi := s.globalIndices.Get(tableName, cond.Column); gi != nil {
+			indexableColumns = append(indexableColumns, cond.Column)
+		}
+	}
+
+	if len(indexableColumns) == 0 {
+		return query, args, false
+	}
+
+	// Find the first column with a global index
+	for _, col := range indexableColumns {
+		gi := s.globalIndices.Get(tableName, col)
+		if gi != nil {
+			// Try to find the condition for this column
+			var targetCondition *IndexableCondition
+			for _, cond := range conditions {
+				if cond.Column == col {
+					targetCondition = cond
+					break
+				}
+			}
+
+			if targetCondition != nil {
+				// Try to rewrite query using the global index
+				rewritten, newArgs, err := gi.RewriteQueryWithIndex(query, args, col)
 				if err == nil {
-					return modifiedQuery, modifiedArgs, true
+					return rewritten, newArgs, true
 				}
 				log.Printf("Failed to rewrite query with global index: %v", err)
 			}
@@ -243,6 +275,72 @@ func (s *Sharding) OptimizeQueryWithGlobalIndex(query string, args []interface{}
 	}
 
 	return query, args, false
+}
+
+// Extract conditions from a WHERE clause node
+func extractConditionsFromNode(node *pg_query.Node, args []interface{}) []*IndexableCondition {
+	if node == nil {
+		return nil
+	}
+
+	var conditions []*IndexableCondition
+
+	switch n := node.Node.(type) {
+	case *pg_query.Node_AExpr:
+		// Handle simple comparisons (column = value)
+		if n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_OP && len(n.AExpr.Name) > 0 {
+			opName := n.AExpr.Name[0].Node.(*pg_query.Node_String_).String_.Sval
+			if opName == "=" {
+				var colName string
+				if colRef, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_ColumnRef); ok {
+					for _, field := range colRef.ColumnRef.Fields {
+						if strNode, ok := field.Node.(*pg_query.Node_String_); ok {
+							colName = strNode.String_.Sval
+							break
+						}
+					}
+				}
+
+				if colName != "" {
+					var value interface{}
+					argIndex := -1
+
+					// Extract the value or parameter reference
+					if paramRef, ok := n.AExpr.Rexpr.Node.(*pg_query.Node_ParamRef); ok {
+						// Parameter like $1, $2
+						paramIndex := int(paramRef.ParamRef.Number) - 1
+						if paramIndex >= 0 && paramIndex < len(args) {
+							argIndex = paramIndex
+							value = args[paramIndex]
+						}
+					} else if constNode, ok := n.AExpr.Rexpr.Node.(*pg_query.Node_AConst); ok {
+						// Literal value
+						if strVal, ok := constNode.AConst.Val.(*pg_query.A_Const_Sval); ok {
+							value = strVal.Sval.Sval
+						} else if intVal, ok := constNode.AConst.Val.(*pg_query.A_Const_Ival); ok {
+							value = intVal.Ival.Ival
+						}
+					}
+
+					if value != nil || argIndex >= 0 {
+						conditions = append(conditions, &IndexableCondition{
+							Column:   colName,
+							Operator: opName,
+							Value:    value,
+							ArgIndex: argIndex,
+						})
+					}
+				}
+			}
+		}
+	case *pg_query.Node_BoolExpr:
+		// For AND/OR expressions, recursively process each argument
+		for _, arg := range n.BoolExpr.Args {
+			conditions = append(conditions, extractConditionsFromNode(arg, args)...)
+		}
+	}
+
+	return conditions
 }
 
 // ConnPoolWithGlobalIndex enhances the connection pool with global index functionality
@@ -261,29 +359,95 @@ func NewConnPoolWithGlobalIndex(original gorm.ConnPool, s *Sharding) *ConnPoolWi
 
 // QueryContext intercepts queries and uses global index if applicable
 func (cp *ConnPoolWithGlobalIndex) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
-	newQuery, newArgs, useGlobalIndex := cp.sharding.OptimizeQueryWithGlobalIndex(query, args)
-	if useGlobalIndex {
-		return cp.originalPool.QueryContext(ctx, newQuery, newArgs...)
+	// Store the original query for debugging
+	cp.sharding.querys.Store("last_query", query)
+
+	// Skip system queries and explicitly marked queries
+	if isSystemQuery(query) || strings.Contains(query, "/* nosharding */") || strings.Contains(query, "/* noglobalindex */") {
+		return cp.originalPool.QueryContext(ctx, query, args...)
 	}
-	return cp.originalPool.QueryContext(ctx, query, args...)
+
+	// Use the query rewriter to optimize the query with global index
+	if cp.sharding.queryRewriter != nil {
+		newQuery, newArgs, useGlobalIndex := cp.sharding.queryRewriter.RewriteQuery(query, args)
+		if useGlobalIndex {
+			// Store the rewritten query for debugging/testing
+			cp.sharding.querys.Store("last_query", newQuery)
+			return cp.originalPool.QueryContext(ctx, newQuery, newArgs...)
+		}
+	}
+
+	// If no global index optimization, fall back to normal sharding
+	_, stQuery, _, err := cp.sharding.resolve(query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store the resolved query
+	cp.sharding.querys.Store("last_query", stQuery)
+
+	return cp.originalPool.QueryContext(ctx, stQuery, args...)
 }
 
 // ExecContext intercepts exec calls and uses global index if applicable
 func (cp *ConnPoolWithGlobalIndex) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	newQuery, newArgs, useGlobalIndex := cp.sharding.OptimizeQueryWithGlobalIndex(query, args)
-	if useGlobalIndex {
-		return cp.originalPool.ExecContext(ctx, newQuery, newArgs...)
+	// Store the original query for debugging
+	cp.sharding.querys.Store("last_query", query)
+
+	// Skip system queries and explicitly marked queries
+	if isSystemQuery(query) || strings.Contains(query, "/* nosharding */") || strings.Contains(query, "/* noglobalindex */") {
+		return cp.originalPool.ExecContext(ctx, query, args...)
 	}
-	return cp.originalPool.ExecContext(ctx, query, args...)
+
+	// Use the query rewriter to optimize the query with global index
+	if cp.sharding.queryRewriter != nil {
+		newQuery, newArgs, useGlobalIndex := cp.sharding.queryRewriter.RewriteQuery(query, args)
+		if useGlobalIndex {
+			// Store the rewritten query for debugging/testing
+			cp.sharding.querys.Store("last_query", newQuery)
+			return cp.originalPool.ExecContext(ctx, newQuery, newArgs...)
+		}
+	}
+
+	// If no global index optimization, fall back to normal sharding
+	_, stQuery, _, err := cp.sharding.resolve(query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store the resolved query
+	cp.sharding.querys.Store("last_query", stQuery)
+
+	return cp.originalPool.ExecContext(ctx, stQuery, args...)
 }
 
 // QueryRowContext intercepts query row calls and uses global index if applicable
 func (cp *ConnPoolWithGlobalIndex) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
-	newQuery, newArgs, useGlobalIndex := cp.sharding.OptimizeQueryWithGlobalIndex(query, args)
-	if useGlobalIndex {
-		return cp.originalPool.QueryRowContext(ctx, newQuery, newArgs...)
+	// Store the original query for debugging
+	cp.sharding.querys.Store("last_query", query)
+
+	// Skip system queries and explicitly marked queries
+	if isSystemQuery(query) || strings.Contains(query, "/* nosharding */") || strings.Contains(query, "/* noglobalindex */") {
+		return cp.originalPool.QueryRowContext(ctx, query, args...)
 	}
-	return cp.originalPool.QueryRowContext(ctx, query, args...)
+
+	// Use the query rewriter to optimize the query with global index
+	if cp.sharding.queryRewriter != nil {
+		newQuery, newArgs, useGlobalIndex := cp.sharding.queryRewriter.RewriteQuery(query, args)
+		if useGlobalIndex {
+			// Store the rewritten query for debugging/testing
+			cp.sharding.querys.Store("last_query", newQuery)
+			return cp.originalPool.QueryRowContext(ctx, newQuery, newArgs...)
+		}
+	}
+
+	// If no global index optimization, fall back to normal sharding
+	_, stQuery, _, _ := cp.sharding.resolve(query, args...)
+
+	// Store the resolved query
+	cp.sharding.querys.Store("last_query", stQuery)
+
+	return cp.originalPool.QueryRowContext(ctx, stQuery, args...)
 }
 
 // PrepareContext implements the ConnPool interface
@@ -293,90 +457,81 @@ func (cp *ConnPoolWithGlobalIndex) PrepareContext(ctx context.Context, query str
 
 // RewriteQueryWithIndex rewrites a query to use the global index for efficient lookup
 func (gi *GlobalIndex) RewriteQueryWithIndex(query string, args []interface{}, indexColumn string) (string, []interface{}, error) {
-	startTime := time.Now()
+	log.Printf("Rewriting query to use global index for table %s, column %s: %s",
+		gi.TableName, indexColumn, query)
 
-	// Check if we need to track metrics
-	if gi.Options.EnableMetrics && gi.metrics != nil {
-		gi.metrics.TotalQueries++
-		defer func() {
-			elapsed := time.Since(startTime).Milliseconds()
-			// Update average query time with exponential moving average
-			gi.metrics.AvgQueryTimeMs = (gi.metrics.AvgQueryTimeMs*0.9 + float64(elapsed)*0.1)
-			if elapsed > 100 { // Consider slow if > 100ms
-				gi.metrics.SlowQueries++
-			}
-		}()
+	// First, get the records from the global index
+	var indexRecords []GlobalIndexRecord
+
+	// Extract the value we're searching for
+	valueStr, paramIdx, found := extractValueForIndexColumn(query, args, indexColumn)
+	if !found {
+		return query, args, fmt.Errorf("could not extract value for column %s", indexColumn)
 	}
 
-	// Find matching records in the global index
-	var indexRecords []GlobalIndexRecord
-	valueStr, argIdx, found := extractValueForIndexColumn(query, args, indexColumn)
-	if !found {
-		// Couldn't extract a value for this column
-		return query, args, fmt.Errorf("could not extract value for index column %s", indexColumn)
+	// If we found a parameter reference, get the actual value
+	if paramIdx >= 0 {
+		valueStr = fmt.Sprintf("%v", args[paramIdx])
 	}
 
 	// Query the global index for matching records
-	var dbQuery *gorm.DB
-	if argIdx >= 0 && argIdx < len(args) {
-		// Use parameter value from args
-		dbQuery = gi.DB.Where("index_column = ? AND index_value = ?", indexColumn, fmt.Sprintf("%v", args[argIdx]))
-	} else {
-		// Use literal value from query
-		dbQuery = gi.DB.Where("index_column = ? AND index_value = ?", indexColumn, valueStr)
-	}
-
-	err := dbQuery.Find(&indexRecords).Error
+	err := gi.DB.Where("index_column = ? AND index_value = ?", indexColumn, valueStr).Find(&indexRecords).Error
 	if err != nil {
 		return query, args, fmt.Errorf("error querying global index: %w", err)
 	}
 
-	// Handle metrics
-	if gi.Options.EnableMetrics && gi.metrics != nil {
-		if len(indexRecords) > 0 {
-			gi.metrics.IndexHits++
-		} else {
-			gi.metrics.IndexMisses++
-
-			// Check if we need to trigger a rebuild
-			missRate := float64(gi.metrics.IndexMisses) / float64(gi.metrics.TotalQueries) * 100
-			if gi.AutoRebuild && missRate > float64(gi.Options.RebuildThreshold) {
-				go gi.RebuildIndex(context.Background())
-			}
-		}
-	}
-
 	if len(indexRecords) == 0 {
-		// No matches found in the index, return a query that will yield no results
-		return fmt.Sprintf("SELECT * FROM %s WHERE 1=0 /* noglobalindex */", gi.TableName), args, nil
+		// No matching records found, return a query that will yield no results
+		return fmt.Sprintf("SELECT * FROM %s WHERE 1=0 /* via_global_index_empty */", gi.TableName), args, nil
 	}
 
-	// Group records by shard suffix
+	// Group records by shard
 	suffixToIDs := make(map[string][]int64)
 	for _, record := range indexRecords {
 		suffixToIDs[record.TableSuffix] = append(suffixToIDs[record.TableSuffix], record.RecordID)
 	}
 
-	// Rewrite the query for each shard
-	var subQueries []string
+	// Create new args for the rewritten query
 	newArgs := make([]interface{}, len(args))
-	copy(newArgs, args) // Make a copy of the original args
+	copy(newArgs, args)
+
+	// Parse the original query to help with rewriting
+	parsed, err := pg_query.Parse(query)
+	if err != nil {
+		return query, args, fmt.Errorf("error parsing query: %w", err)
+	}
+
+	if len(parsed.Stmts) == 0 {
+		return query, args, fmt.Errorf("no statements found in query")
+	}
+
+	stmt := parsed.Stmts[0]
+	var isSelectQuery bool
+
+	// Different handling based on query type
+	switch stmt.Stmt.Node.(type) {
+	case *pg_query.Node_SelectStmt:
+		isSelectQuery = true
+	}
+
+	// For each shard, create a query
+	var subQueries []string
 
 	for suffix, ids := range suffixToIDs {
 		shardTableName := gi.TableName + suffix
 
-		// Rewrite the query to use the specific shard table
+		// Replace the table name in the query
 		shardQuery := strings.Replace(query, gi.TableName, shardTableName, -1)
 
-		// Add condition to filter by IDs from the global index
+		// Create placeholders for the IDs
 		idPlaceholders := make([]string, len(ids))
 		for i, id := range ids {
-			paramIdx := len(newArgs) + 1
-			idPlaceholders[i] = fmt.Sprintf("$%d", paramIdx)
+			paramIndex := len(newArgs) + 1
+			idPlaceholders[i] = fmt.Sprintf("$%d", paramIndex)
 			newArgs = append(newArgs, id)
 		}
 
-		// Add ID filter to the WHERE clause
+		// Add the ID filter to the WHERE clause
 		idFilter := fmt.Sprintf(" id IN (%s)", strings.Join(idPlaceholders, ", "))
 		wherePos := strings.Index(strings.ToUpper(shardQuery), "WHERE")
 		if wherePos >= 0 {
@@ -385,19 +540,24 @@ func (gi *GlobalIndex) RewriteQueryWithIndex(query string, args []interface{}, i
 			shardQuery = shardQuery[:wherePos] + idFilter + " AND " + shardQuery[wherePos:]
 		} else {
 			// Add new WHERE clause
-			groupByPos := strings.Index(strings.ToUpper(shardQuery), "GROUP BY")
-			orderByPos := strings.Index(strings.ToUpper(shardQuery), "ORDER BY")
+			// Find appropriate insertion point
+			fromPos := strings.Index(strings.ToUpper(shardQuery), "FROM")
+			if fromPos < 0 {
+				// Should never happen for valid SQL
+				return query, args, fmt.Errorf("malformed query - cannot find FROM clause")
+			}
+
+			// Look for possible insertion point after FROM clause
+			fromPos += 4 // Skip past "FROM"
+			orderPos := strings.Index(strings.ToUpper(shardQuery), "ORDER BY")
+			groupPos := strings.Index(strings.ToUpper(shardQuery), "GROUP BY")
 			limitPos := strings.Index(strings.ToUpper(shardQuery), "LIMIT")
 
 			insertPos := len(shardQuery)
-			if groupByPos > 0 && groupByPos < insertPos {
-				insertPos = groupByPos
-			}
-			if orderByPos > 0 && orderByPos < insertPos {
-				insertPos = orderByPos
-			}
-			if limitPos > 0 && limitPos < insertPos {
-				insertPos = limitPos
+			for _, pos := range []int{orderPos, groupPos, limitPos} {
+				if pos > 0 && pos < insertPos {
+					insertPos = pos
+				}
 			}
 
 			shardQuery = shardQuery[:insertPos] + " WHERE " + idFilter + " " + shardQuery[insertPos:]
@@ -406,16 +566,48 @@ func (gi *GlobalIndex) RewriteQueryWithIndex(query string, args []interface{}, i
 		subQueries = append(subQueries, shardQuery)
 	}
 
-	if len(subQueries) == 0 {
-		return query, args, fmt.Errorf("failed to build sub-queries")
-	}
-
+	// Handle special case for a single shard (no need for UNION)
 	if len(subQueries) == 1 {
-		// Only one shard, no need for UNION
 		return subQueries[0] + " /* via_global_index */", newArgs, nil
 	}
 
-	// Combine multiple shard queries with UNION ALL
+	// Combine queries with UNION ALL
+	if isSelectQuery {
+		// Check if we need to wrap the UNION query for SELECT statements
+		// This is needed for queries with ORDER BY, LIMIT, etc.
+		orderByPos := strings.Index(strings.ToUpper(query), "ORDER BY")
+		limitPos := strings.Index(strings.ToUpper(query), "LIMIT")
+		groupByPos := strings.Index(strings.ToUpper(query), "GROUP BY")
+		havingPos := strings.Index(strings.ToUpper(query), "HAVING")
+
+		// If the query has clauses that should be applied after UNION, wrap it
+		if orderByPos > 0 || limitPos > 0 || groupByPos > 0 || havingPos > 0 {
+			// Extract clauses
+			var clauses string
+			earliestPos := len(query)
+
+			for _, pos := range []int{orderByPos, limitPos, groupByPos, havingPos} {
+				if pos > 0 && pos < earliestPos {
+					earliestPos = pos
+				}
+			}
+
+			if earliestPos < len(query) {
+				clauses = query[earliestPos:]
+				// Remove these clauses from the sub-queries
+				for i := range subQueries {
+					subQueries[i] = strings.Split(subQueries[i], clauses)[0]
+				}
+
+				// Combine with UNION ALL and wrap with the clauses
+				finalQuery := fmt.Sprintf("SELECT * FROM (%s) AS combined_result %s /* via_global_index */",
+					strings.Join(subQueries, " UNION ALL "), clauses)
+				return finalQuery, newArgs, nil
+			}
+		}
+	}
+
+	// Default case: just combine with UNION ALL
 	finalQuery := strings.Join(subQueries, " UNION ALL ") + " /* via_global_index */"
 	return finalQuery, newArgs, nil
 }
@@ -423,7 +615,7 @@ func (gi *GlobalIndex) RewriteQueryWithIndex(query string, args []interface{}, i
 // Helper function to extract a value for an index column from a WHERE clause
 func extractValueForIndexColumn(query string, args []interface{}, indexColumn string) (string, int, bool) {
 	// First, try to find a parameter for this column
-	re := regexp.MustCompile(fmt.Sprintf(`%s\s*=\s*\$(\d+)`, indexColumn))
+	re := regexp.MustCompile(fmt.Sprintf(`%s\s*=\s*\$(\d+)`, regexp.QuoteMeta(indexColumn)))
 	matches := re.FindStringSubmatch(query)
 	if len(matches) >= 2 {
 		paramIdx, _ := strconv.Atoi(matches[1])
@@ -433,41 +625,20 @@ func extractValueForIndexColumn(query string, args []interface{}, indexColumn st
 	}
 
 	// Try to find a literal value for this column
-	re = regexp.MustCompile(fmt.Sprintf(`%s\s*=\s*'([^']*)'`, indexColumn))
+	re = regexp.MustCompile(fmt.Sprintf(`%s\s*=\s*'([^']*)'`, regexp.QuoteMeta(indexColumn)))
 	matches = re.FindStringSubmatch(query)
 	if len(matches) >= 2 {
 		return matches[1], -1, true
 	}
 
 	// Try to find a numeric literal
-	re = regexp.MustCompile(fmt.Sprintf(`%s\s*=\s*(\d+)`, indexColumn))
+	re = regexp.MustCompile(fmt.Sprintf(`%s\s*=\s*(\d+)`, regexp.QuoteMeta(indexColumn)))
 	matches = re.FindStringSubmatch(query)
 	if len(matches) >= 2 {
 		return matches[1], -1, true
 	}
 
 	return "", -1, false
-}
-
-// Helper function to extract column names from a WHERE clause
-func extractConditionColumns(condNode *pg_query.Node) []string {
-	var columns []string
-
-	switch n := condNode.Node.(type) {
-	case *pg_query.Node_AExpr:
-		// A = B expression
-		if colRef, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_ColumnRef); ok {
-			columns = append(columns, extractColumnNameFromRef(colRef.ColumnRef))
-		}
-
-	case *pg_query.Node_BoolExpr:
-		// AND/OR expression, process all arguments
-		for _, arg := range n.BoolExpr.Args {
-			columns = append(columns, extractConditionColumns(arg)...)
-		}
-	}
-
-	return columns
 }
 
 // Helper function to extract column name from a column reference

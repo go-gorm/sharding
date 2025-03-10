@@ -52,16 +52,6 @@ func (r *GlobalIndexRegistry) Get(tableName, columnName string) *GlobalIndex {
 	return tableIndices[columnName]
 }
 
-//// GlobalIndex manages a global index across all table partitions
-//type GlobalIndex struct {
-//	sync.RWMutex
-//	DB           *gorm.DB
-//	TableName    string   // Base table name (without partition suffix)
-//	IndexColumns []string // Columns to be indexed
-//	Config       Config   // The sharding configuration for this table
-//	AutoRebuild  bool     // Whether to automatically rebuild the index when it's outdated
-//}
-
 // GlobalIndexRecord represents a record in the global index table
 type GlobalIndexRecord struct {
 	ID          uint64 `gorm:"primaryKey"`
@@ -87,99 +77,143 @@ type GlobalIndexStats struct {
 	Cardinality  map[string]int64 // column name -> count of unique values
 }
 
+// register callbacks to maintain the index
+// register callbacks to maintain the index
+func (s *Sharding) registerIndexCallbacks(gi *GlobalIndex, db *gorm.DB) {
+	// Ensure we only register each callback once by checking if it already exists
+	callbacks := db.Callback()
+
+	// Create callback
+	if callbacks.Create().Get("global_index:create") == nil {
+		callbacks.Create().After("gorm:create").Register("global_index:create", func(db *gorm.DB) {
+			// Skip if this isn't being called from a sharded table operation
+			if db.Statement.Schema == nil || !strings.HasPrefix(db.Statement.Table, gi.TableName) {
+				return
+			}
+
+			// Call our index update function
+			gi.afterCreate(db)
+		})
+	}
+
+	// Delete callback
+	if callbacks.Delete().Get("global_index:delete") == nil {
+		callbacks.Delete().After("gorm:delete").Register("global_index:delete", func(db *gorm.DB) {
+			// Skip if this isn't being called from a sharded table operation
+			if db.Statement.Schema == nil || !strings.HasPrefix(db.Statement.Table, gi.TableName) {
+				return
+			}
+
+			// Call our index update function
+			gi.afterDelete(db)
+		})
+	}
+
+	// Update callback
+	if callbacks.Update().Get("global_index:update") == nil {
+		callbacks.Update().After("gorm:update").Register("global_index:update", func(db *gorm.DB) {
+			// Skip if this isn't being called from a sharded table operation
+			if db.Statement.Schema == nil || !strings.HasPrefix(db.Statement.Table, gi.TableName) {
+				return
+			}
+
+			// Call our index update function
+			gi.afterUpdate(db)
+		})
+	}
+}
+
 // We need to add globalIndices field to the Sharding struct
 // This is required to register and track global indices
 
 // NewGlobalIndex creates a new global index for a sharded table
-func (s *Sharding) NewGlobalIndex(tableName string, indexColumns []string) (*GlobalIndex, error) {
-	// Check if the table is configured for sharding
-	config, exists := s.configs[tableName]
-	if !exists {
-		return nil, fmt.Errorf("table %s is not configured for sharding", tableName)
-	}
-
-	gi := &GlobalIndex{
-		DB:           s.DB,
-		TableName:    tableName,
-		IndexColumns: indexColumns,
-		Config:       config,
-		AutoRebuild:  true, // Enable auto-rebuild by default
-	}
-
-	// Ensure the global index table exists
-	err := gi.ensureGlobalIndexTable()
-	if err != nil {
-		return nil, err
-	}
-
-	// Register callbacks to maintain the index
-	s.Callback().Create().After("gorm:create").Register("global_index:create", gi.afterCreate)
-	s.Callback().Delete().After("gorm:delete").Register("global_index:delete", gi.afterDelete)
-	s.Callback().Update().After("gorm:update").Register("global_index:update", gi.afterUpdate)
-
-	// Register the index with the global registry
-	// We'll handle this in the public RegisterGlobalIndex method
-
-	return gi, nil
-}
+//func (s *Sharding) NewGlobalIndex(tableName string, indexColumns []string) (*GlobalIndex, error) {
+//	// Check if the table is configured for sharding
+//	config, exists := s.configs[tableName]
+//	if !exists {
+//		return nil, fmt.Errorf("table %s is not configured for sharding", tableName)
+//	}
+//
+//	gi := &GlobalIndex{
+//		DB:           s.DB,
+//		TableName:    tableName,
+//		IndexColumns: indexColumns,
+//		Config:       config,
+//		AutoRebuild:  true, // Enable auto-rebuild by default
+//	}
+//
+//	// Ensure the global index table exists
+//	err := gi.ensureGlobalIndexTable()
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	// Register callbacks to maintain the index
+//	//s.Callback().Create().After("gorm:create").Register("global_index:create", gi.afterCreate)
+//	//s.Callback().Delete().After("gorm:delete").Register("global_index:delete", gi.afterDelete)
+//	//s.Callback().Update().After("gorm:update").Register("global_index:update", gi.afterUpdate)
+//
+//	// Register the index with the global registry
+//	// We'll handle this in the public RegisterGlobalIndex method
+//
+//	return gi, nil
+//}
 
 // RegisterGlobalIndex registers a global index for a table with the specified columns
-func (s *Sharding) RegisterGlobalIndex(tableName string, indexColumns []string) (*GlobalIndex, error) {
-	if s.globalIndices == nil {
-		s.globalIndices = &GlobalIndexRegistry{
-			indices: make(map[string]map[string]*GlobalIndex),
-		}
-	}
-
-	gi, err := s.NewGlobalIndex(tableName, indexColumns)
-	if err != nil {
-		return nil, err
-	}
-
-	// Register with the global registry
-	for _, col := range indexColumns {
-		s.globalIndices.Add(tableName, col, gi)
-	}
-
-	return gi, nil
-}
+//func (s *Sharding) RegisterGlobalIndex(tableName string, indexColumns []string) (*GlobalIndex, error) {
+//	if s.globalIndices == nil {
+//		s.globalIndices = &GlobalIndexRegistry{
+//			indices: make(map[string]map[string]*GlobalIndex),
+//		}
+//	}
+//
+//	gi, err := s.NewGlobalIndex(tableName, indexColumns)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	// Register with the global registry
+//	for _, col := range indexColumns {
+//		s.globalIndices.Add(tableName, col, gi)
+//	}
+//
+//	return gi, nil
+//}
 
 // ensureGlobalIndexTable creates the global index table if it doesn't exist
-func (gi *GlobalIndex) ensureGlobalIndexTable() error {
-	if !gi.DB.Migrator().HasTable(&GlobalIndexRecord{}) {
-		err := gi.DB.AutoMigrate(&GlobalIndexRecord{})
-		if err != nil {
-			return fmt.Errorf("failed to create global index table: %w", err)
-		}
+//func (gi *GlobalIndex) ensureGlobalIndexTable() error {
+//	if !gi.DB.Migrator().HasTable(&GlobalIndexRecord{}) {
+//		err := gi.DB.AutoMigrate(&GlobalIndexRecord{})
+//		if err != nil {
+//			return fmt.Errorf("failed to create global index table: %w", err)
+//		}
+//
+//		// Create composite indices for faster lookups
+//		for _, col := range gi.IndexColumns {
+//			indexName := fmt.Sprintf("idx_%s_%s", gi.TableName, col)
+//			err = gi.DB.Exec(fmt.Sprintf(
+//				"CREATE INDEX IF NOT EXISTS %s ON global_index (index_column, index_value) WHERE index_column = '%s'",
+//				indexName, col,
+//			)).Error
+//			if err != nil {
+//				return fmt.Errorf("failed to create index for column %s: %w", col, err)
+//			}
+//		}
+//	}
+//	return nil
+//}
 
-		// Create composite indices for faster lookups
-		for _, col := range gi.IndexColumns {
-			indexName := fmt.Sprintf("idx_%s_%s", gi.TableName, col)
-			err = gi.DB.Exec(fmt.Sprintf(
-				"CREATE INDEX IF NOT EXISTS %s ON global_index (index_column, index_value) WHERE index_column = '%s'",
-				indexName, col,
-			)).Error
-			if err != nil {
-				return fmt.Errorf("failed to create index for column %s: %w", col, err)
-			}
-		}
-	}
-	return nil
-}
-
-// afterCreate adds entries to the global index after a record is created
 func (gi *GlobalIndex) afterCreate(db *gorm.DB) {
-	if db.Statement.Schema == nil || db.Statement.Schema.Table != gi.TableName {
-		return
-	}
-
 	// Extract the suffix from the table name
 	tableName := db.Statement.Table
 	suffix := ""
-	if strings.HasPrefix(tableName, gi.TableName) && len(tableName) > len(gi.TableName) {
+
+	// Correctly extract the suffix - this is a key fix
+	if strings.HasPrefix(tableName, gi.TableName) {
 		suffix = tableName[len(gi.TableName):]
 	}
 
+	// If we couldn't determine a suffix, just return
 	if suffix == "" {
 		return
 	}
@@ -187,38 +221,25 @@ func (gi *GlobalIndex) afterCreate(db *gorm.DB) {
 	// Get the primary key value
 	var recordID int64
 	if pkField := db.Statement.Schema.PrioritizedPrimaryField; pkField != nil {
-		// Fix: Use the correct method signature
-		value, _ := pkField.ValueOf(context.Background(), db.Statement.ReflectValue)
-		if id, ok := value.(int64); ok {
-			recordID = id
-		} else {
-			// Try to convert the value to int64
-			switch v := value.(type) {
-			case int:
-				recordID = int64(v)
-			case int32:
-				recordID = int64(v)
-			case uint:
-				recordID = int64(v)
-			case uint32:
-				recordID = int64(v)
-			case uint64:
-				recordID = int64(v)
-			case float64:
-				recordID = int64(v)
-			default:
-				log.Printf("Warning: Could not convert primary key to int64 for table %s", gi.TableName)
-				return
-			}
+		value, isZero := pkField.ValueOf(context.Background(), db.Statement.ReflectValue)
+		if isZero {
+			return
+		}
+
+		var err error
+		recordID, err = toInt64(value)
+		if err != nil {
+			log.Printf("Error converting primary key to int64: %v", err)
+			return
 		}
 	} else {
-		log.Printf("Warning: Could not find primary key for table %s", gi.TableName)
+		log.Printf("No primary key found for table %s", gi.TableName)
 		return
 	}
 
-	// Create index records for each indexed column
+	// Create index entries
+	currentTime := time.Now().Unix()
 	var indexRecords []*GlobalIndexRecord
-	currentTime := db.NowFunc().Unix()
 
 	for _, colName := range gi.IndexColumns {
 		field, ok := db.Statement.Schema.FieldsByDBName[colName]
@@ -226,9 +247,8 @@ func (gi *GlobalIndex) afterCreate(db *gorm.DB) {
 			continue
 		}
 
-		// Fix: Use the correct method signature
-		value, _ := field.ValueOf(context.Background(), db.Statement.ReflectValue)
-		if value == nil {
+		value, isZero := field.ValueOf(context.Background(), db.Statement.ReflectValue)
+		if isZero || value == nil {
 			continue
 		}
 
@@ -245,17 +265,22 @@ func (gi *GlobalIndex) afterCreate(db *gorm.DB) {
 		})
 	}
 
-	// Batch insert all index records
+	// Insert the index records
 	if len(indexRecords) > 0 {
-		err := db.CreateInBatches(indexRecords, 100).Error
-		if err != nil {
+		// Use a transaction to ensure all records are inserted
+		tx := gi.DB.Begin()
+		if err := tx.CreateInBatches(indexRecords, gi.Options.BatchSize).Error; err != nil {
+			tx.Rollback()
 			log.Printf("Error creating global index entries: %v", err)
+		} else {
+			tx.Commit()
 		}
 	}
 }
 
 // afterDelete removes entries from the global index after a record is deleted
 func (gi *GlobalIndex) afterDelete(db *gorm.DB) {
+	// Skip if not applicable
 	if db.Statement.Schema == nil || db.Statement.Schema.Table != gi.TableName {
 		return
 	}
@@ -274,63 +299,61 @@ func (gi *GlobalIndex) afterDelete(db *gorm.DB) {
 	// Get the primary key value
 	var recordID int64
 	if pkField := db.Statement.Schema.PrioritizedPrimaryField; pkField != nil {
-		value, _ := pkField.ValueOf(context.Background(), db.Statement.ReflectValue)
-		if id, ok := value.(int64); ok {
-			recordID = id
-		} else {
-			// Try to convert the value to int64
-			switch v := value.(type) {
-			case int:
-				recordID = int64(v)
-			case int32:
-				recordID = int64(v)
-			case uint:
-				recordID = int64(v)
-			case uint32:
-				recordID = int64(v)
-			case uint64:
-				recordID = int64(v)
-			case float64:
-				recordID = int64(v)
-			default:
-				log.Printf("Warning: Could not convert primary key to int64 for table %s", gi.TableName)
-				return
-			}
+		value, isZero := pkField.ValueOf(context.Background(), db.Statement.ReflectValue)
+		if isZero {
+			return
+		}
+
+		var err error
+		recordID, err = toInt64(value)
+		if err != nil {
+			log.Printf("Error converting primary key to int64: %v", err)
+			return
 		}
 	} else {
-		log.Printf("Warning: Could not find primary key for table %s", gi.TableName)
+		log.Printf("No primary key found for table %s", gi.TableName)
 		return
 	}
 
-	// Delete all index entries for this record
-	err := db.Where("table_suffix = ? AND record_id = ?", suffix, recordID).Delete(&GlobalIndexRecord{}).Error
-	if err != nil {
-		log.Printf("Error deleting global index entries: %v", err)
+	// Delete the index entries
+	deleteQuery := gi.DB.Where("table_suffix = ? AND record_id = ?", suffix, recordID).Delete(&GlobalIndexRecord{})
+
+	// Either sync or async delete based on options
+	if gi.Options.AsyncUpdates {
+		go func() {
+			if err := deleteQuery.Error; err != nil {
+				log.Printf("Error deleting global index entries: %v", err)
+			}
+		}()
+	} else {
+		if err := deleteQuery.Error; err != nil {
+			log.Printf("Error deleting global index entries: %v", err)
+		}
 	}
 }
 
 // afterUpdate updates entries in the global index after a record is updated
 func (gi *GlobalIndex) afterUpdate(db *gorm.DB) {
+	// Skip if not applicable
 	if db.Statement.Schema == nil || db.Statement.Schema.Table != gi.TableName {
 		return
 	}
 
-	// Check if any indexed columns are being updated
-	updateIndexed := false
+	// Check if any indexed columns were changed
+	var changedIndexColumns []string
 	for _, colName := range gi.IndexColumns {
-		// Fix: Use the correct Changed method signature
-		changed := db.Statement.Changed(colName)
-		if changed {
-			updateIndexed = true
-			break
+		if db.Statement.Changed(colName) {
+			changedIndexColumns = append(changedIndexColumns, colName)
 		}
 	}
 
-	if !updateIndexed {
-		return // No indexed columns were updated
+	// If no indexed columns were changed, we're done
+	if len(changedIndexColumns) == 0 {
+		return
 	}
 
-	// For simplicity, delete old entries and create new ones
+	// For simplicity, delete the old entries and create new ones
+	// This is easier than trying to update individual values
 	gi.afterDelete(db)
 	gi.afterCreate(db)
 }
@@ -584,12 +607,9 @@ func (gi *GlobalIndex) isColumnIndexed(column string) bool {
 
 // RebuildIndex rebuilds the global index for all shards
 func (gi *GlobalIndex) RebuildIndex(ctx context.Context) error {
-	gi.Lock()
-	defer gi.Unlock()
-
 	log.Printf("Starting to rebuild global index for table %s", gi.TableName)
 
-	// Delete all existing entries for this table
+	// Clear existing index entries for this table
 	if err := gi.DB.Where("1=1").Delete(&GlobalIndexRecord{}).Error; err != nil {
 		return fmt.Errorf("failed to clear global index: %w", err)
 	}
@@ -600,94 +620,97 @@ func (gi *GlobalIndex) RebuildIndex(ctx context.Context) error {
 		return fmt.Errorf("no shards found for table %s", gi.TableName)
 	}
 
-	totalRecords := 0
-	indexRecords := []*GlobalIndexRecord{}
+	totalRecords := int64(0)
+	totalEntries := int64(0)
 	currentTime := time.Now().Unix()
 
-	// For each shard, collect index entries
+	// Process each shard
 	for _, suffix := range suffixes {
 		tableName := gi.TableName + suffix
 
-		// Check if the table exists
-		if !gi.DB.Migrator().HasTable(tableName) {
+		// Skip if table doesn't exist
+		exists := gi.DB.Migrator().HasTable(tableName)
+		if !exists {
 			log.Printf("Table %s doesn't exist, skipping", tableName)
 			continue
 		}
 
-		// Get the model type for reflection
-		model := reflect.New(reflect.TypeOf(struct{}{})).Interface()
-		if err := gi.DB.Table(tableName).Limit(1).Scan(model).Error; err != nil {
-			log.Printf("Error getting model type for table %s: %v", tableName, err)
+		// Get model structure
+		var count int64
+		err := gi.DB.Table(tableName).Count(&count).Error
+		if err != nil {
+			log.Printf("Error counting records in table %s: %v", tableName, err)
 			continue
 		}
 
-		// Get all records from this shard
-		var records []map[string]interface{}
-		if err := gi.DB.Table(tableName).Find(&records).Error; err != nil {
-			log.Printf("Error fetching records from table %s: %v", tableName, err)
-			continue
+		if count == 0 {
+			continue // Skip empty tables
 		}
 
-		// Extract indexed columns and add to index
-		for _, record := range records {
-			recordID, ok := record["id"]
-			if !ok {
-				log.Printf("Record in table %s has no ID field", tableName)
+		// Process in batches
+		batchSize := gi.Options.BatchSize
+		if batchSize <= 0 {
+			batchSize = 500 // Default batch size
+		}
+
+		for offset := int64(0); offset < count; offset += int64(batchSize) {
+			var records []map[string]interface{}
+			err := gi.DB.Table(tableName).Offset(int(offset)).Limit(batchSize).Find(&records).Error
+			if err != nil {
+				log.Printf("Error fetching records from table %s: %v", tableName, err)
 				continue
 			}
 
-			// Convert ID to int64
-			var id int64
-			switch v := recordID.(type) {
-			case int64:
-				id = v
-			case int:
-				id = int64(v)
-			case float64:
-				id = int64(v)
-			default:
-				log.Printf("Record ID in table %s is not a number: %v", tableName, recordID)
-				continue
-			}
+			// Create index entries for each record
+			var indexRecords []*GlobalIndexRecord
 
-			// For each indexed column, create an index entry
-			for _, colName := range gi.IndexColumns {
-				value, ok := record[colName]
+			for _, record := range records {
+				recordID, ok := record["id"]
 				if !ok {
 					continue
 				}
 
-				// Skip nil values
-				if value == nil {
+				id, err := toInt64(recordID)
+				if err != nil {
 					continue
 				}
 
-				// Convert value to string for storage
-				valueStr := fmt.Sprintf("%v", value)
+				// Index each column
+				for _, colName := range gi.IndexColumns {
+					value, ok := record[colName]
+					if !ok || value == nil {
+						continue
+					}
 
-				indexRecords = append(indexRecords, &GlobalIndexRecord{
-					TableSuffix: suffix,
-					RecordID:    id,
-					IndexColumn: colName,
-					IndexValue:  valueStr,
-					CreatedAt:   currentTime,
-					UpdatedAt:   currentTime,
-				})
+					valueStr := fmt.Sprintf("%v", value)
+
+					indexRecords = append(indexRecords, &GlobalIndexRecord{
+						TableSuffix: suffix,
+						RecordID:    id,
+						IndexColumn: colName,
+						IndexValue:  valueStr,
+						CreatedAt:   currentTime,
+						UpdatedAt:   currentTime,
+					})
+				}
 			}
-		}
 
-		totalRecords += len(records)
-	}
+			// Insert the index records
+			if len(indexRecords) > 0 {
+				err := gi.DB.CreateInBatches(indexRecords, 500).Error
+				if err != nil {
+					log.Printf("Error inserting index records for table %s: %v", tableName, err)
+					continue
+				}
 
-	// Batch insert all index records
-	if len(indexRecords) > 0 {
-		if err := gi.DB.CreateInBatches(indexRecords, 1000).Error; err != nil {
-			return fmt.Errorf("failed to rebuild global index: %w", err)
+				totalRecords += int64(len(records))
+				totalEntries += int64(len(indexRecords))
+			}
 		}
 	}
 
 	log.Printf("Rebuilt global index for table %s, processed %d records, created %d index entries",
-		gi.TableName, totalRecords, len(indexRecords))
+		gi.TableName, totalRecords, totalEntries)
 
 	return nil
 }
