@@ -370,7 +370,7 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 		}
 		s.mutex.Lock()
 		if db.Statement.ConnPool != nil {
-			if s.globalIndices != nil {
+			if s.globalIndices != nil && len(s.globalIndices.indices) > 0 {
 				// Wrap the connection pool with our global index-aware version
 				db.Statement.ConnPool = NewConnPoolWithGlobalIndex(db.Statement.ConnPool, s)
 			} else {

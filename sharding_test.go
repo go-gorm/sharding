@@ -902,6 +902,112 @@ func TestSelfJoinShardedTableWithAliases(t *testing.T) {
 	tassert.GreaterOrEqual(t, len(results), 1)
 }
 
+func TestDoubleWriteDebug(t *testing.T) {
+	// Clean up tables before test
+	truncateTables(db, "orders", "orders_0", "orders_1", "orders_2", "orders_3")
+
+	// Create a custom config with DoubleWrite explicitly enabled
+	doubleWriteConfig := Config{
+		DoubleWrite:         true,
+		ShardingKey:         "user_id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKSnowflake,
+	}
+
+	// Register a debug middleware that captures both queries
+	debugDB, _ := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+		Logger:                                   logger.Default.LogMode(logger.Info),
+	})
+
+	testMiddleware := Register(doubleWriteConfig, &Order{})
+	debugDB.Use(testMiddleware)
+
+	// Insert a record and capture queries
+	testOrder := Order{
+		UserID:     100,
+		Product:    "DoubleWriteTest",
+		CategoryID: 1,
+	}
+
+	// Before executing, let's see what queries are generated
+	ftQuery, stQuery, table, err := testMiddleware.resolve("INSERT INTO orders (user_id, product, category_id) VALUES (100, 'DoubleWriteTest', 1)")
+	t.Logf("Full table query: %s", ftQuery)
+	t.Logf("Sharded table query: %s", stQuery)
+	t.Logf("Table: %s", table)
+	t.Logf("Error: %v", err)
+
+	err = debugDB.Create(&testOrder).Error
+	assert.Equal[error, error](t, err, nil)
+}
+
+func TestDoubleWrite(t *testing.T) {
+	// Clean up tables before test
+	truncateTables(db, "orders", "orders_0", "orders_1", "orders_2", "orders_3")
+
+	// Create a custom config with DoubleWrite explicitly enabled
+	doubleWriteConfig := Config{
+		DoubleWrite:         true,
+		ShardingKey:         "user_id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKSnowflake,
+	}
+
+	// Create a fresh DB instance with the configured middleware
+	testDB, _ := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+		Logger:                                   logger.Default.LogMode(logger.Info),
+	})
+
+	testMiddleware := Register(doubleWriteConfig, &Order{})
+	testDB.Use(testMiddleware)
+
+	// Insert a record
+	testOrder := Order{
+		UserID:     100,
+		Product:    "DoubleWriteTest",
+		CategoryID: 1,
+	}
+
+	err := testDB.Create(&testOrder).Error
+	assert.Equal[error, error](t, err, nil)
+
+	// Verify the record exists in the sharded table
+	var shardCount int64
+	err = testDB.Table("orders_0").Where("id = ?", testOrder.ID).Count(&shardCount).Error
+	assert.Equal[error, error](t, err, nil)
+	assert.Equal(t, int64(1), shardCount)
+
+	// Verify the record also exists in the main table
+	var mainCount int64
+	err = testDB.Table("orders").Where("id = ?", testOrder.ID).Count(&mainCount).Error
+	assert.Equal[error, error](t, err, nil)
+	assert.Equal(t, int64(1), mainCount)
+
+	// Update the record to test double write on updates
+	err = testDB.Model(&Order{}).Where("id = ?", testOrder.ID).Update("product", "UpdatedProduct").Error
+	assert.Equal[error, error](t, err, nil)
+
+	// Verify update in both tables
+	var shardProduct, mainProduct string
+	testDB.Table("orders_0").Where("id = ?", testOrder.ID).Select("product").Scan(&shardProduct)
+	testDB.Table("orders").Where("id = ?", testOrder.ID).Select("product").Scan(&mainProduct)
+
+	assert.Equal(t, "UpdatedProduct", shardProduct)
+	assert.Equal(t, "UpdatedProduct", mainProduct)
+
+	// Test delete with double write
+	err = testDB.Delete(&Order{}, testOrder.ID).Error
+	assert.Equal[error, error](t, err, nil)
+
+	// Verify deletion in both tables
+	testDB.Table("orders_0").Where("id = ?", testOrder.ID).Count(&shardCount)
+	testDB.Table("orders").Where("id = ?", testOrder.ID).Count(&mainCount)
+
+	assert.Equal(t, int64(0), shardCount)
+	assert.Equal(t, int64(0), mainCount)
+}
+
 func TestJoinShardedTablesDifferentKeys(t *testing.T) {
 	// Clean up tables before test
 	truncateTables(db, "orders", "orders_0", "orders_1", "orders_2", "orders_3",
