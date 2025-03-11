@@ -385,8 +385,29 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 
 // resolve splits the old query into full table query and sharding table query
 func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName string, err error) {
-	ftQuery = query
-	stQuery = query
+	// Check if this is a direct query to a sharded table
+	for baseTable, config := range s.configs {
+		// Get all suffixes for this table
+		suffixes := config.ShardingSuffixs()
+		for _, suffix := range suffixes {
+			// Check if query contains table with this suffix
+			shardedTable := baseTable + suffix
+			if strings.Contains(query, shardedTable) {
+				// We found a direct query to a sharded table
+				// Set the base table name and return the query as-is
+				tableName = baseTable
+				ftQuery = query
+				stQuery = query
+				return
+			}
+		}
+	}
+	if ftQuery == "" {
+		ftQuery = query
+	}
+	if stQuery == "" {
+		stQuery = query
+	}
 	if len(s.configs) == 0 {
 		return
 	}
@@ -447,15 +468,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 			// If no sharding key found
 			if !hasShardingKey {
-				// Check if any of the tables have DoubleWrite enabled
-				for _, table := range tables {
-					if cfg, ok := s.configs[table]; ok && cfg.DoubleWrite {
-						// Return the original query for the main table, no error
-						return ftQuery, ftQuery, table, nil
-					}
-				}
-				// No DoubleWrite enabled, return error
-				return ftQuery, stQuery, "", errors.New("no sharding key found")
+				return ftQuery, stQuery, tableName, ErrMissingShardingKey
 			}
 		}
 
@@ -502,9 +515,9 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		*pg_query.Node_CommentStmt,
 		*pg_query.Node_GrantStmt:
 		// DDL statements. Bypass sharding.
-		return query, query, "", nil
+		return query, query, tableName, nil
 	default:
-		return ftQuery, stQuery, "", fmt.Errorf("unsupported statement type")
+		return ftQuery, stQuery, tableName, fmt.Errorf("unsupported statement type")
 	}
 
 	// Iterate through each table to determine its sharded name
@@ -549,21 +562,12 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 				for _, valuesList := range valuesSelect.ValuesLists {
 					value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
 					if err != nil {
-						// Check if DoubleWrite is enabled for this table
-						if r.DoubleWrite {
-							// Return the original query for the main table, no error
-							return ftQuery, ftQuery, tableName, nil
-						}
 						return ftQuery, stQuery, tableName, err
 					}
 
 					currentSuffix, err := getSuffix(value, id, keyFound, r)
 					if err != nil {
 						// Check if DoubleWrite is enabled for this table
-						if r.DoubleWrite {
-							// Return the original query for the main table, no error
-							return ftQuery, ftQuery, tableName, nil
-						}
 						return ftQuery, stQuery, tableName, err
 					}
 
@@ -587,21 +591,12 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 				for _, valuesList := range insertStmt.ReturningList {
 					value, id, keyFound, err := s.extractInsertShardingKeyFromValues(r, insertStmt, valuesList, args...)
 					if err != nil {
-						// Check if DoubleWrite is enabled
-						if r.DoubleWrite {
-							// Return the original query for main table, no error
-							return ftQuery, ftQuery, tableName, nil
-						}
 						return ftQuery, stQuery, tableName, err
 					}
 
 					currentSuffix, err := getSuffix(value, id, keyFound, r)
 					if err != nil {
 						// Check if DoubleWrite is enabled
-						if r.DoubleWrite {
-							// Return the original query for main table, no error
-							return ftQuery, ftQuery, tableName, nil
-						}
 						return ftQuery, stQuery, tableName, err
 					}
 
@@ -622,11 +617,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			if len(suffixes) == 1 {
 				suffix = consistentSuffix
 			} else {
-				// Check if DoubleWrite is enabled
-				if r.DoubleWrite {
-					// Return the original query for main table, no error
-					return ftQuery, ftQuery, tableName, nil
-				}
+
 				return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
 			}
 
@@ -658,22 +649,13 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			// Extract sharding key for the current table
 			value, id, keyFound, err := s.extractShardingKeyFromConditions(shardingKey, conditions, args, aliasMap, fullTableName)
 			if err != nil {
-				// Check if DoubleWrite is enabled
-				if r.DoubleWrite {
-					// Return the original query for main table, no error
-					return ftQuery, ftQuery, tableName, nil
-				}
+
 				return ftQuery, stQuery, tableName, err
 			}
 
 			// Determine the suffix based on the sharding key
 			suffix, err = getSuffix(value, id, keyFound, r)
 			if err != nil {
-				// Check if DoubleWrite is enabled
-				if r.DoubleWrite {
-					// Return the original query for main table, no error
-					return ftQuery, ftQuery, tableName, nil
-				}
 				return ftQuery, stQuery, tableName, err
 			}
 

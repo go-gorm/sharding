@@ -939,6 +939,41 @@ func TestDoubleWriteDebug(t *testing.T) {
 
 	err = debugDB.Create(&testOrder).Error
 	assert.Equal[error, error](t, err, nil)
+
+	// VERIFICATION: Check if the record exists in both tables
+
+	// 1. Check the main table (orders) - using the middleware is fine here
+	var mainTableOrder Order
+	mainTableErr := debugDB.Table("orders").Where("id = ?", testOrder.ID).First(&mainTableOrder).Error
+
+	// 2. Check the sharded table (orders_0) - SKIP MIDDLEWARE for this query
+	var shardedTableOrder Order
+	// Create a new session without middleware to query sharded table directly
+	directDB := debugDB.Session(&gorm.Session{})
+	directDB.Statement.ConnPool = db.Statement.ConnPool // Use raw connection
+	// Add the sharding_ignore flag to skip the middleware
+
+	shardedTableErr := directDB.Table("orders_0").
+		Where("id = ?", testOrder.ID).
+		Where("user_id = ?", 100).
+		First(&shardedTableOrder).Error
+
+	// Log the results for debugging
+	t.Logf("Main table record found: %v, Error: %v", mainTableOrder.ID > 0, mainTableErr)
+	t.Logf("Sharded table record found: %v, Error: %v", shardedTableOrder.ID > 0, shardedTableErr)
+
+	// Assert that both records exist
+	assert.Equal[error, error](t, mainTableErr, nil, "Record should exist in the main table")
+	assert.Equal[error, error](t, shardedTableErr, nil, "Record should exist in the sharded table")
+
+	// Check the data is correct in both tables
+	if mainTableErr == nil && shardedTableErr == nil {
+		assert.Equal(t, testOrder.ID, mainTableOrder.ID, "ID should match in main table")
+		assert.Equal(t, testOrder.Product, mainTableOrder.Product, "Product should match in main table")
+
+		assert.Equal(t, testOrder.ID, shardedTableOrder.ID, "ID should match in sharded table")
+		assert.Equal(t, testOrder.Product, shardedTableOrder.Product, "Product should match in sharded table")
+	}
 }
 
 func TestDoubleWrite(t *testing.T) {
@@ -964,6 +999,7 @@ func TestDoubleWrite(t *testing.T) {
 
 	// Insert a record
 	testOrder := Order{
+		ID:         1,
 		UserID:     100,
 		Product:    "DoubleWriteTest",
 		CategoryID: 1,
@@ -974,13 +1010,13 @@ func TestDoubleWrite(t *testing.T) {
 
 	// Verify the record exists in the sharded table
 	var shardCount int64
-	err = testDB.Table("orders_0").Where("id = ?", testOrder.ID).Count(&shardCount).Error
+	err = testDB.Table("orders").Where("id = ?", testOrder.ID).Count(&shardCount).Error
 	assert.Equal[error, error](t, err, nil)
 	assert.Equal(t, int64(1), shardCount)
 
 	// Verify the record also exists in the main table
 	var mainCount int64
-	err = testDB.Table("orders").Where("id = ?", testOrder.ID).Count(&mainCount).Error
+	err = testDB.Table("orders").Clauses(hints.New("nosharding")).Where("id = ?", testOrder.ID).Count(&mainCount).Error
 	assert.Equal[error, error](t, err, nil)
 	assert.Equal(t, int64(1), mainCount)
 
@@ -990,19 +1026,22 @@ func TestDoubleWrite(t *testing.T) {
 
 	// Verify update in both tables
 	var shardProduct, mainProduct string
-	testDB.Table("orders_0").Where("id = ?", testOrder.ID).Select("product").Scan(&shardProduct)
-	testDB.Table("orders").Where("id = ?", testOrder.ID).Select("product").Scan(&mainProduct)
+	testDB.Table("orders").Where("id = ?", testOrder.ID).Select("product").Scan(&shardProduct)
+	testDB.Table("orders").Clauses(hints.New("nosharding")).Where("id = ?", testOrder.ID).Select("product").Scan(&mainProduct)
 
 	assert.Equal(t, "UpdatedProduct", shardProduct)
 	assert.Equal(t, "UpdatedProduct", mainProduct)
+
+	testDB.Table("orders").Where("id = ?", testOrder.ID).Count(&shardCount)
+	testDB.Table("orders").Clauses(hints.New("nosharding")).Where("id = ?", testOrder.ID).Count(&mainCount)
 
 	// Test delete with double write
 	err = testDB.Delete(&Order{}, testOrder.ID).Error
 	assert.Equal[error, error](t, err, nil)
 
 	// Verify deletion in both tables
-	testDB.Table("orders_0").Where("id = ?", testOrder.ID).Count(&shardCount)
-	testDB.Table("orders").Where("id = ?", testOrder.ID).Count(&mainCount)
+	testDB.Table("orders").Where("id = ?", testOrder.ID).Count(&shardCount)
+	testDB.Table("orders").Clauses(hints.New("nosharding")).Where("id = ?", testOrder.ID).Count(&mainCount)
 
 	assert.Equal(t, int64(0), shardCount)
 	assert.Equal(t, int64(0), mainCount)
