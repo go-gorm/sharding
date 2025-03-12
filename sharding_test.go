@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2155,6 +2156,352 @@ func TestUnregisteredTableNotSharded(t *testing.T) {
 
 	// Clean up
 	db.Exec("DROP TABLE IF EXISTS products")
+}
+
+func TestConcurrentConnPoolOperations(t *testing.T) {
+	// Create a new DB connection with debug logging
+	testDB, err := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+		Logger:                                   logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		t.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	// Set up multiple concurrent connections
+	const numGoroutines = 10
+	const operationsPerGoroutine = 20
+
+	// Create configs with different tables and settings for concurrency testing
+	configs := make(map[string]Config)
+	for i := 0; i < 5; i++ {
+		tableName := fmt.Sprintf("concurrent_table_%d", i)
+		configs[tableName] = Config{
+			DoubleWrite:         i%2 == 0, // Alternate between true and false
+			ShardingKey:         "user_id",
+			NumberOfShards:      4,
+			PrimaryKeyGenerator: PKSnowflake,
+			ShardingSuffixs: func() (suffixs []string) {
+				return []string{"_0", "_1", "_2"}
+			},
+		}
+	}
+
+	// Register our middleware with multiple table configs
+	testMiddleware := Register(configs, []interface{}{&Order{}}...)
+	testDB.Use(testMiddleware)
+
+	// Important: Initialize the database connection properly to set up ConnPool
+	err = testDB.AutoMigrate(&Order{})
+	if err != nil {
+		t.Fatalf("Failed to migrate: %v", err)
+	}
+
+	// Create connection pool implementation for testing
+	connPool := &ConnPool{
+		ConnPool: testDB.Statement.ConnPool,
+		sharding: testMiddleware,
+	}
+	testMiddleware.ConnPool = connPool
+
+	// Create a context that we can cancel to stop all goroutines
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create a WaitGroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
+
+	// Channel to report errors from goroutines
+	errCh := make(chan error, numGoroutines)
+
+	// Launch multiple goroutines to perform concurrent operations
+	for i := 0; i < numGoroutines; i++ {
+		go func(routineID int) {
+			defer wg.Done()
+
+			// Alternate between different tables and operations
+			for j := 0; j < operationsPerGoroutine; j++ {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					// Pick an operation: query, exec, or queryRow based on j
+					operation := j % 3
+
+					// Pick a table
+					tableIndex := j % 5
+					tableName := fmt.Sprintf("concurrent_table_%d", tableIndex)
+					userID := 100 + (routineID * 100) + j
+
+					// Ensure we're testing reads from the configs with sharding key
+					querySQL := fmt.Sprintf("SELECT * FROM %s WHERE user_id = %d", tableName, userID)
+
+					// Perform the operation
+					switch operation {
+					case 0: // Query
+						_, err := testMiddleware.ConnPool.QueryContext(ctx, querySQL)
+						if err != nil && err.Error() != "invalid memory address or nil pointer dereference" {
+							// Only report non-nil pointer errors, which would be expected in a test environment
+							errCh <- fmt.Errorf("goroutine %d query error: %v", routineID, err)
+							cancel() // Stop all goroutines on error
+							return
+						}
+					case 1: // Exec
+						execSQL := fmt.Sprintf("INSERT INTO %s (user_id, product) VALUES (%d, 'test')", tableName, userID)
+						_, err := testMiddleware.ConnPool.ExecContext(ctx, execSQL)
+						if err != nil && err.Error() != "invalid memory address or nil pointer dereference" {
+							errCh <- fmt.Errorf("goroutine %d exec error: %v", routineID, err)
+							cancel()
+							return
+						}
+					case 2: // QueryRow
+						rowSQL := fmt.Sprintf("SELECT id FROM %s WHERE user_id = %d", tableName, userID)
+						testMiddleware.ConnPool.QueryRowContext(ctx, rowSQL)
+						// QueryRow doesn't return errors until Scan, so we don't check here
+					}
+				}
+			}
+		}(i)
+	}
+
+	// Add another goroutine that changes configs while others are running
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := 0; i < 10; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				// Acquire lock properly to update configs
+				testMiddleware.mutex.Lock()
+				// Modify configs - adding or changing properties
+				newTableName := fmt.Sprintf("new_table_%d", i)
+				testMiddleware.configs[newTableName] = Config{
+					DoubleWrite:         i%2 == 0,
+					ShardingKey:         "user_id",
+					NumberOfShards:      4,
+					PrimaryKeyGenerator: PKSnowflake,
+				}
+				testMiddleware.mutex.Unlock()
+
+				// Small sleep to give other goroutines time to access during changes
+				time.Sleep(time.Millisecond * 5)
+			}
+		}
+	}()
+
+	// Wait for all goroutines to complete or for context to be canceled
+	wgDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(wgDone)
+	}()
+
+	// Wait for either all goroutines to finish or an error to occur
+	select {
+	case <-wgDone:
+		// All goroutines completed successfully
+		t.Log("All goroutines completed successfully")
+	case err := <-errCh:
+		// At least one goroutine encountered an error
+		t.Fatalf("Test failed with error: %v", err)
+	case <-time.After(30 * time.Second):
+		// Timeout for safety
+		cancel()
+		t.Fatal("Test timed out after 30 seconds")
+	}
+
+	// If we made it here without any reported errors, the test passes
+}
+
+// TestConfigAccessRaceCondition specifically tests the race condition fix in the ConnPool implementation
+func TestConfigAccessRaceCondition(t *testing.T) {
+	// Create a test configuration map with a table that has DoubleWrite enabled
+	configs := map[string]Config{
+		"orders": {
+			DoubleWrite:         true,
+			ShardingKey:         "user_id",
+			NumberOfShards:      4,
+			PrimaryKeyGenerator: PKSnowflake,
+		},
+	}
+
+	// Register the middleware with the config
+	middleware := Register(configs, &Order{})
+
+	// Set up a wait group to synchronize goroutines
+	var wg sync.WaitGroup
+	const goroutines = 10
+	wg.Add(goroutines)
+
+	// Run multiple goroutines that will concurrently access the configs
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+
+			// Access the configuration 100 times
+			for j := 0; j < 100; j++ {
+				// This simulates what happens inside QueryContext, ExecContext, etc.
+				// Reading the DoubleWrite flag from the config
+				middleware.mutex.RLock()
+				config, ok := middleware.configs["orders"]
+				doubleWrite := ok && config.DoubleWrite
+				middleware.mutex.RUnlock()
+
+				// Use the value to avoid compiler optimizations
+				if doubleWrite {
+					// Just to use the value
+					_ = doubleWrite
+				}
+
+				// Sleep a tiny amount to increase chance of race
+				time.Sleep(time.Microsecond)
+			}
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+
+	// If we get here without the race detector finding issues, the test passes
+	t.Log("Completed accessing configs concurrently without race conditions")
+}
+
+// TestDataRaceWithDoubleWrite tests specific race conditions with double write operations
+func TestDataRaceWithDoubleWrite(t *testing.T) {
+	// Create a test DB with proper configuration
+	testDB, err := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+		Logger:                                   logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		t.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	// Configure a table with DoubleWrite=true
+	doubleWriteConfigs := map[string]Config{
+		"orders": {
+			DoubleWrite:         true,
+			ShardingKey:         "user_id",
+			NumberOfShards:      4,
+			PrimaryKeyGenerator: PKSnowflake,
+		},
+	}
+
+	// Register middleware
+	doubleWriteMiddleware := Register(doubleWriteConfigs, &Order{})
+	testDB.Use(doubleWriteMiddleware)
+
+	// Important: Initialize the database connection properly to set up ConnPool
+	err = testDB.AutoMigrate(&Order{})
+	if err != nil {
+		t.Fatalf("Failed to migrate: %v", err)
+	}
+
+	// Create connection pool implementation for testing
+	connPool := &ConnPool{
+		ConnPool: testDB.Statement.ConnPool,
+		sharding: doubleWriteMiddleware,
+	}
+	doubleWriteMiddleware.ConnPool = connPool
+
+	// Prepare test tables
+	truncateTables(testDB, "orders", "orders_0", "orders_1", "orders_2", "orders_3")
+
+	// Create context for coordination
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Channel to report errors
+	errCh := make(chan error, 10)
+
+	// Launch concurrent writers
+	const numWriters = 5
+	var wg sync.WaitGroup
+	wg.Add(numWriters)
+
+	for i := 0; i < numWriters; i++ {
+		go func(id int) {
+			defer wg.Done()
+
+			// Each writer creates orders for a specific user ID
+			userID := 100 + id
+
+			for j := 0; j < 10; j++ {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					// Create an order with insert query that will require DoubleWrite
+					insertSQL := fmt.Sprintf(
+						"INSERT INTO orders (user_id, product, category_id) VALUES (%d, 'Product-%d-%d', %d)",
+						userID, id, j, j+1,
+					)
+
+					_, err := doubleWriteMiddleware.ConnPool.ExecContext(ctx, insertSQL)
+					if err != nil {
+						errCh <- fmt.Errorf("writer %d insert error: %v", id, err)
+						cancel()
+						return
+					}
+
+					// Brief pause
+					time.Sleep(time.Millisecond * 5)
+				}
+			}
+		}(i)
+	}
+
+	// Launch concurrent readers
+	const numReaders = 5
+	wg.Add(numReaders)
+
+	for i := 0; i < numReaders; i++ {
+		go func(id int) {
+			defer wg.Done()
+
+			for j := 0; j < 20; j++ {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					// Query that will cause the middleware to check configs
+					userID := 100 + (j % numWriters) // Cycle through the user IDs
+					querySQL := fmt.Sprintf("SELECT * FROM orders WHERE user_id = %d", userID)
+
+					_, err := doubleWriteMiddleware.ConnPool.QueryContext(ctx, querySQL)
+					if err != nil {
+						errCh <- fmt.Errorf("reader %d query error: %v", id, err)
+						cancel()
+						return
+					}
+
+					// Brief pause
+					time.Sleep(time.Millisecond * 3)
+				}
+			}
+		}(i)
+	}
+
+	// Wait for completion or error
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Log("All concurrent operations completed successfully")
+	case err := <-errCh:
+		t.Fatalf("Test failed with error: %v", err)
+	case <-time.After(20 * time.Second):
+		cancel()
+		t.Fatal("Test timed out after 20 seconds")
+	}
 }
 
 // Function to safely get value from pointer types

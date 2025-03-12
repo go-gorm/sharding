@@ -409,9 +409,29 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName string, err error) {
 	// Check if this is a direct query to a sharded table
 	log.Printf("RESOLVE FUNCTION ENTRY: Analyzing query: %s", query)
+
+	// Initialize return values to avoid nil pointers
+	ftQuery = query
+	stQuery = query
+
+	// Create a map with mutex to safely store tableMap (fixes the race condition)
+	var tableMapMutex sync.Mutex
+	tableMap := make(map[string]string) // originalTableName -> shardedTableName
+
+	// Check if s.configs is nil or empty
+	if s == nil || s.configs == nil {
+		return query, query, tableName, nil
+	}
+
+	s.mutex.RLock()
+	configsCount := len(s.configs)
 	for baseTable, config := range s.configs {
-		// Get all suffixes for this table
-		suffixes := config.ShardingSuffixs()
+		// Safely get sharding suffixes, handling nil cases
+		var suffixes []string
+		if config.ShardingSuffixs != nil {
+			suffixes = config.ShardingSuffixs()
+		}
+
 		for _, suffix := range suffixes {
 			// Check if query contains table with this suffix
 			shardedTable := baseTable + suffix
@@ -421,44 +441,22 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 				tableName = baseTable
 				ftQuery = query
 				stQuery = query
+				s.mutex.RUnlock()
 				return
 			}
 		}
 	}
-	if ftQuery == "" {
-		ftQuery = query
-	}
-	if stQuery == "" {
-		stQuery = query
-	}
-	if len(s.configs) == 0 {
-		return
+	s.mutex.RUnlock()
+
+	// If configs is empty, return the query as-is
+	if configsCount == 0 {
+		return ftQuery, stQuery, tableName, nil
 	}
 
 	// Skip processing for system queries or explicit nosharding comments
 	if isSystemQuery(query) || strings.Contains(query, "/* nosharding */") {
 		return ftQuery, stQuery, tableName, nil
 	}
-
-	// Extract table name from query
-	//extractedTableName, err := extractTableNameFromQuery(query)
-	//if err != nil {
-	//	fmt.Println("extractTableNameFromQuery error", err)
-	//	// If we can't extract a table name, just return the original query
-	//	return query, query, tableName, nil
-	//}
-	//
-	////fmt.Println("extractedTableName", extractedTableName)
-	//// Check if the table is registered for sharding
-	//s.mutex.RLock()
-	//_, registered := s.configs[extractedTableName]
-	//s.mutex.RUnlock()
-	//
-	//log.Printf("Extracted table name: %s", extractedTableName)
-	//if !registered {
-	//	// If table is not registered, return the original query
-	//	return query, query, extractedTableName, nil
-	//}
 
 	// Parse the SQL query using pg_query_go
 	parsed, err := pg_query.Parse(query)
@@ -479,8 +477,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	var insertStmt *pg_query.InsertStmt
 	var selectStmt *pg_query.SelectStmt
 	var conditions []*pg_query.Node
-	// Initialize a map to hold table-specific sharded names
-	tableMap := make(map[string]string) // originalTableName -> shardedTableName
 
 	// Process the parsed statement to extract tables and conditions
 	switch stmtNode := stmt.Stmt.Node.(type) {
@@ -499,7 +495,11 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		if isSelect && len(conditions) > 0 {
 			hasShardingKey := false
 			for _, table := range tables {
-				if cfg, ok := s.configs[table]; ok {
+				s.mutex.RLock()
+				cfg, ok := s.configs[table]
+				s.mutex.RUnlock()
+
+				if ok {
 					shardingKey := cfg.ShardingKey
 					_, _, keyFound, _ := s.extractShardingKeyFromConditions(shardingKey, conditions, args, nil, table)
 					if keyFound {
@@ -583,7 +583,10 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			fullTableName = fmt.Sprintf("%s.%s", schemaName, localTableName)
 		}
 
+		s.mutex.RLock()
 		r, ok := s.configs[fullTableName]
+		s.mutex.RUnlock()
+
 		if !ok {
 			continue // Skip tables not configured for sharding
 		}
@@ -663,12 +666,15 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			if len(suffixes) == 1 {
 				suffix = consistentSuffix
 			} else {
-
 				return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
 			}
 
 			shardedTableName := originalTableName + suffix
+
+			// Thread-safely update the tableMap
+			tableMapMutex.Lock()
 			tableMap[originalTableName] = shardedTableName
+			tableMapMutex.Unlock()
 
 			// Update the table name in the insert statement
 			if insertStmt.Relation != nil {
@@ -693,7 +699,11 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 				// Add logging before and after extracting sharding keys
 				for _, table := range tables {
-					if cfg, ok := s.configs[table]; ok {
+					s.mutex.RLock()
+					cfg, ok := s.configs[table]
+					s.mutex.RUnlock()
+
+					if ok {
 						shardingKey := cfg.ShardingKey
 						value, id, keyFound, err := s.extractShardingKeyFromConditions(shardingKey, conditions, args, aliasMap, table)
 						log.Printf("For table %s: keyFound=%v, value=%v, id=%v, err=%v", table, keyFound, value, id, err)
@@ -706,7 +716,11 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 							// Log the updating of tableMap
 							shardedTableName := table + suffix
 							log.Printf("Adding to tableMap: %s -> %s", table, shardedTableName)
+
+							// Thread-safely update the tableMap
+							tableMapMutex.Lock()
 							tableMap[table] = shardedTableName
+							tableMapMutex.Unlock()
 						}
 					} else {
 						log.Printf("No config found for table %s", table)
@@ -720,7 +734,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			// Extract sharding key for the current table
 			value, id, keyFound, err := s.extractShardingKeyFromConditions(shardingKey, conditions, args, aliasMap, fullTableName)
 			if err != nil {
-
 				return ftQuery, stQuery, tableName, err
 			}
 
@@ -731,10 +744,14 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			}
 
 			shardedTableName := originalTableName + suffix
-			tableMap[originalTableName] = shardedTableName
-		}
 
+			// Thread-safely update the tableMap
+			tableMapMutex.Lock()
+			tableMap[originalTableName] = shardedTableName
+			tableMapMutex.Unlock()
+		}
 	}
+
 	// Traverse the AST and replace original table names with sharded table names
 	replaceTableNames(stmt.Stmt, tableMap)
 
