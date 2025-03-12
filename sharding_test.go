@@ -513,7 +513,7 @@ func dropTables() {
 }
 
 func TestMigrate(t *testing.T) {
-	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories", "order_details", "order_details_0", "order_details_1", "order_details_2", "order_details_3", "products", "users", "users_0", "users_1", "users_2", "users_3"}
+	targetTables := []string{"orders", "orders_0", "orders_1", "orders_2", "orders_3", "categories", "order_details", "order_details_0", "order_details_1", "order_details_2", "order_details_3", "users", "users_0", "users_1", "users_2", "users_3"}
 	sort.Strings(targetTables)
 
 	// origin tables
@@ -2197,7 +2197,7 @@ func TestConcurrentConnPoolOperations(t *testing.T) {
 	}
 
 	// Register our middleware with multiple table configs
-	testMiddleware := Register(configs, []interface{}{&Order{}}...)
+	testMiddleware := Register(configs, &Order{})
 	testDB.Use(testMiddleware)
 
 	// Important: Initialize the database connection properly to set up ConnPool

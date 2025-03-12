@@ -37,19 +37,23 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	// Store the last query safely
 	pool.sharding.querys.Store("last_query", stQuery)
 	// Handle errors with DoubleWrite fallback
-	if err != nil {
-		if errors.Is(err, ErrMissingShardingKey) && table != "" {
-			if r, ok := pool.sharding.configs[table]; ok && r.DoubleWrite {
-				// Execute on the original table
-				var result sql.Result
-				pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
-					result, err = pool.ConnPool.ExecContext(ctx, ftQuery, args...)
-					rowsAffected, _ = result.RowsAffected()
-					return pool.sharding.Explain(ftQuery, args...), rowsAffected
-				}, pool.sharding.Error)
-				// Log and return
-				return result, err
-			}
+	if table != "" && err != nil && errors.Is(err, ErrMissingShardingKey) {
+		pool.sharding.mutex.RLock()
+		doubleWrite := true
+		if r, ok := pool.sharding.configs[table]; ok {
+			doubleWrite = r.DoubleWrite
+		}
+		pool.sharding.mutex.RUnlock()
+		// Execute on the original table
+		if doubleWrite {
+			var result sql.Result
+			pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
+				result, err = pool.ConnPool.ExecContext(ctx, ftQuery, args...)
+				rowsAffected, _ = result.RowsAffected()
+				return pool.sharding.Explain(ftQuery, args...), rowsAffected
+			}, pool.sharding.Error)
+			// Log and return
+			return result, err
 		}
 		return nil, err
 	}
@@ -118,8 +122,8 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 		if r, ok := pool.sharding.configs[table]; ok && r.DoubleWrite {
 			// Execute the INSERT on the main table first
 			// For inserts that use QueryContext (with RETURNING clause), we need to
-			// execute on the main table with ExecContext since we don't need the returned values
-			_, err := pool.ConnPool.QueryContext(ctx, query, args...)
+			// execute on the main table with QueryContext
+			_, err := pool.ConnPool.QueryContext(ctx, ftQuery, args...)
 			if err != nil {
 				log.Printf("Error double-writing to main table: %v", err)
 				// Continue anyway with the sharded table operation
@@ -143,19 +147,25 @@ func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
 	log.Printf("QueryRowContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",
 		ftQuery, stQuery, query, table, err)
+
+	// If error and DoubleWrite is enabled, use original query
+	if table != "" && err != nil && errors.Is(err, ErrMissingShardingKey) {
+		pool.sharding.mutex.RLock()
+		doubleWrite := true
+		if r, ok := pool.sharding.configs[table]; ok {
+			doubleWrite = r.DoubleWrite
+		}
+		pool.sharding.mutex.RUnlock()
+		if doubleWrite {
+			return pool.ConnPool.QueryRowContext(ctx, ftQuery, args...)
+		}
+		// For other errors, we can't return an error from this method, but the Row will error when used
+	}
+
 	pool.sharding.querys.Store("last_query", stQuery)
 
 	// Check if this is an INSERT operation for double write
 	isInsert := strings.Contains(strings.ToUpper(query), "INSERT INTO")
-
-	// If error and DoubleWrite is enabled, use original query
-	if err != nil && errors.Is(err, ErrMissingShardingKey) && table != "" {
-		if r, ok := pool.sharding.configs[table]; ok && r.DoubleWrite {
-			pool.sharding.querys.Store("last_query", query)
-			return pool.ConnPool.QueryRowContext(ctx, query, args...)
-		}
-		// For other errors, we can't return an error from this method, but the Row will error when used
-	}
 
 	// Handle double-write for INSERT operations
 	if isInsert && table != "" && err == nil {
