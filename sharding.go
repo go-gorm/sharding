@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -368,6 +369,18 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 			return
 		}
 
+		stmt := db.Statement
+		if stmt.Schema != nil && stmt.Schema.Table != "" {
+			s.mutex.RLock()
+			_, tableRegistered := s.configs[stmt.Schema.Table]
+			s.mutex.RUnlock()
+
+			// If table is not registered for sharding, skip applying sharding logic
+			if !tableRegistered {
+				return
+			}
+		}
+
 		// Don't hold the lock while creating the ConnPool
 		var connPool gorm.ConnPool
 
@@ -423,6 +436,23 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	// Skip processing for system queries or explicit nosharding comments
 	if isSystemQuery(query) || strings.Contains(query, "/* nosharding */") {
 		return ftQuery, stQuery, tableName, nil
+	}
+
+	// Extract table name from query
+	extractedTableName, err := extractTableNameFromQuery(query)
+	if err != nil {
+		// If we can't extract a table name, just return the original query
+		return query, query, tableName, nil
+	}
+
+	//fmt.Println("extractedTableName", extractedTableName)
+	// Check if the table is registered for sharding
+	s.mutex.RLock()
+	_, registered := s.configs[extractedTableName]
+	s.mutex.RUnlock()
+	if !registered {
+		// If table is not registered, return the original query
+		return query, query, extractedTableName, nil
 	}
 
 	// Parse the SQL query using pg_query_go
@@ -676,7 +706,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		}
 
 	}
-
 	// Traverse the AST and replace original table names with sharded table names
 	replaceTableNames(stmt.Stmt, tableMap)
 
@@ -1835,4 +1864,138 @@ func defaultHashAlgorithm(config *Config) func(value any) (string, error) {
 
 		return fmt.Sprintf(config.tableFormat, id%int(config.NumberOfShards)), nil
 	}
+}
+
+// extractTableNameFromQuery attempts to extract the primary table name from a SQL query
+func extractTableNameFromQuery(query string) (string, error) {
+	// Skip empty queries
+	if query == "" {
+		return "", fmt.Errorf("empty query")
+	}
+
+	// Try to parse with pg_query library for accurate AST-based extraction
+	parsed, err := pg_query.Parse(query)
+	if err != nil {
+		// Fallback to regex-based extraction if parsing fails
+		return extractTableNameWithRegex(query)
+	}
+
+	if len(parsed.Stmts) == 0 {
+		return "", fmt.Errorf("no statements found in query")
+	}
+
+	// Get the first statement
+	stmt := parsed.Stmts[0]
+
+	// Extract table name based on statement type
+	switch stmtNode := stmt.Stmt.Node.(type) {
+	case *pg_query.Node_SelectStmt:
+		return extractTableFromSelectStmt(stmtNode.SelectStmt)
+	case *pg_query.Node_InsertStmt:
+		if stmtNode.InsertStmt.Relation != nil {
+			return stmtNode.InsertStmt.Relation.Relname, nil
+		}
+	case *pg_query.Node_UpdateStmt:
+		if stmtNode.UpdateStmt.Relation != nil {
+			return stmtNode.UpdateStmt.Relation.Relname, nil
+		}
+	case *pg_query.Node_DeleteStmt:
+		if stmtNode.DeleteStmt.Relation != nil {
+			return stmtNode.DeleteStmt.Relation.Relname, nil
+		}
+	}
+
+	// Fallback to regex if we couldn't extract using AST
+	return extractTableNameWithRegex(query)
+}
+
+// extractTableFromSelectStmt extracts the primary table name from a SELECT statement
+func extractTableFromSelectStmt(selectStmt *pg_query.SelectStmt) (string, error) {
+	if len(selectStmt.FromClause) == 0 {
+		return "", fmt.Errorf("no FROM clause in SELECT statement")
+	}
+
+	// Try to get the first table from the FROM clause
+	for _, fromItem := range selectStmt.FromClause {
+		switch node := fromItem.Node.(type) {
+		case *pg_query.Node_RangeVar:
+			// Found a direct table reference
+			return node.RangeVar.Relname, nil
+		case *pg_query.Node_JoinExpr:
+			// For JOIN expressions, try to get the left table
+			if leftTable, err := extractTableFromJoinExpr(node.JoinExpr); err == nil {
+				return leftTable, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not extract table name from SELECT statement")
+}
+
+// extractTableFromJoinExpr extracts the primary table name from a JOIN expression
+func extractTableFromJoinExpr(joinExpr *pg_query.JoinExpr) (string, error) {
+	if joinExpr.Larg != nil {
+		switch node := joinExpr.Larg.Node.(type) {
+		case *pg_query.Node_RangeVar:
+			return node.RangeVar.Relname, nil
+		}
+	}
+	return "", fmt.Errorf("could not extract table from JOIN expression")
+}
+
+// extractTableNameWithRegex uses regular expressions to extract table names as a fallback
+func extractTableNameWithRegex(query string) (string, error) {
+	// Normalize the query to handle whitespace and case variations
+	query = strings.TrimSpace(query)
+	//queryUpper := strings.ToUpper(query)
+
+	// Common SQL keywords that are followed by table names
+	tableIndicators := []string{
+		"FROM\\s+([^\\s,()]+)",           // SELECT ... FROM table
+		"UPDATE\\s+([^\\s,()]+)",         // UPDATE table
+		"INSERT\\s+INTO\\s+([^\\s,()]+)", // INSERT INTO table
+		"DELETE\\s+FROM\\s+([^\\s,()]+)", // DELETE FROM table
+		"JOIN\\s+([^\\s,()]+)",           // JOIN table
+	}
+
+	for _, pattern := range tableIndicators {
+		re := regexp.MustCompile("(?i)" + pattern)
+		matches := re.FindStringSubmatch(query)
+		if len(matches) > 1 {
+			tableName := matches[1]
+			// Remove any schema prefixes, quoting or aliasing
+			tableName = cleanTableName(tableName)
+			return tableName, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not extract table name from query")
+}
+
+// cleanTableName removes schema prefixes, quotes, and other decorations from table names
+func cleanTableName(tableName string) string {
+	// Remove schema prefixes (e.g., "public.users" -> "users")
+	if idx := strings.LastIndex(tableName, "."); idx != -1 {
+		tableName = tableName[idx+1:]
+	}
+
+	// Remove quotes and backticks
+	tableName = strings.Trim(tableName, "\"'`")
+
+	// Remove any table suffix (e.g., "users_0" -> "users")
+	// Only if the suffix matches our sharding pattern _X where X is a number
+	if idx := strings.LastIndex(tableName, "_"); idx != -1 {
+		suffix := tableName[idx+1:]
+		if _, err := strconv.Atoi(suffix); err == nil {
+			tableName = tableName[:idx]
+		}
+	}
+
+	// Remove any alias (e.g., "users u" -> "users")
+	parts := strings.Fields(tableName)
+	if len(parts) > 0 {
+		tableName = parts[0]
+	}
+
+	return tableName
 }

@@ -68,6 +68,14 @@ type Contract struct {
 	UpdatedAt time.Time
 }
 
+// Product is a model that we don't configure for sharding
+type Product struct {
+	ID         int64 `gorm:"primarykey"`
+	Name       string
+	Price      float64
+	CategoryID int64
+}
+
 // ContractData represents detailed contract data
 type ContractData struct {
 	ID         int64 `gorm:"primarykey"`
@@ -2059,6 +2067,94 @@ func TestListPartitionFallbackToDoubleWrite(t *testing.T) {
 			t.Errorf("Expected error to mention 'partition list' or 'sharding key', got: %v", err)
 		}
 	}
+}
+
+func TestUnregisteredTableNotSharded(t *testing.T) {
+	// Create a new DB instance without the sharding middleware
+	db, err := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	// Create the products table
+	db.Exec("DROP TABLE IF EXISTS products")
+	err = db.AutoMigrate(&Product{})
+	if err != nil {
+		t.Fatalf("Failed to create products table: %v", err)
+	}
+
+	// Register sharding middleware with Order configured but NOT Product
+	configs := map[string]Config{
+		"orders": shardingConfig, // Only orders is configured
+	}
+
+	// Create sharding middleware and register it with the DB
+	// Important: Do NOT register Product with the middleware
+	shardingMiddleware := Register(configs, &Order{})
+	db.Use(shardingMiddleware)
+
+	// Insert a product - this should use the main products table
+	product := Product{
+		Name:       "Test Product",
+		Price:      99.99,
+		CategoryID: 1,
+	}
+	result := db.Create(&product)
+	if result.Error != nil {
+		t.Fatalf("Failed to insert product: %v", result.Error)
+	}
+
+	// Verify product was created with an ID
+	tassert.Greater(t, product.ID, int64(0), "Product should be created with an ID")
+
+	// Check if products_0, products_1, etc. tables were NOT created
+	var tableCount int64
+	db.Raw("SELECT COUNT(*) FROM information_schema.tables WHERE table_name LIKE 'products\\_%'").Count(&tableCount)
+	assert.Equal(t, int64(0), tableCount, "No sharded product tables should be created")
+
+	// Verify that the product was inserted into the main products table
+	var count int64
+	db.Table("products").Count(&count)
+	assert.Equal(t, int64(1), count, "Record should be in the main products table")
+
+	// Query the product using GORM's normal First method
+	var retrievedProduct Product
+	result = db.First(&retrievedProduct, product.ID)
+	if result.Error != nil {
+		t.Fatalf("Failed to retrieve product: %v", result.Error)
+	}
+
+	// Verify product data
+	assert.Equal(t, product.ID, retrievedProduct.ID, "ID should match")
+	assert.Equal(t, "Test Product", retrievedProduct.Name, "Name should match")
+	assert.Equal(t, 99.99, retrievedProduct.Price, "Price should match")
+
+	// Update the product using GORM
+	result = db.Model(&Product{}).Where("id = ?", product.ID).Update("price", 129.99)
+	if result.Error != nil {
+		t.Fatalf("Failed to update product: %v", result.Error)
+	}
+
+	// Verify the update succeeded
+	var updatedProduct Product
+	db.First(&updatedProduct, product.ID)
+	assert.Equal(t, 129.99, updatedProduct.Price, "Price should be updated")
+
+	// Delete the product
+	result = db.Delete(&Product{}, product.ID)
+	if result.Error != nil {
+		t.Fatalf("Failed to delete product: %v", result.Error)
+	}
+
+	// Verify the deletion
+	var remaining int64
+	db.Table("products").Count(&remaining)
+	assert.Equal(t, int64(0), remaining, "Product should be deleted")
+
+	// Clean up
+	db.Exec("DROP TABLE IF EXISTS products")
 }
 
 // Function to safely get value from pointer types
