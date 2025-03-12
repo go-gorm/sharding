@@ -91,11 +91,10 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 
 	// Store the query safely using sync.Map
 	pool.sharding.querys.Store("last_query", stQuery)
-
 	// Thread-safe access to configs
-	var doubleWrite bool
 	if table != "" && err != nil && errors.Is(err, ErrMissingShardingKey) {
 		pool.sharding.mutex.RLock()
+		doubleWrite := true
 		if r, ok := pool.sharding.configs[table]; ok {
 			doubleWrite = r.DoubleWrite
 		}
