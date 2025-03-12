@@ -364,22 +364,30 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 	// When DoubleWrite is enabled, we need to query database schema
 	// information by table name during the migration.
 	if _, ok := db.Get(ShardingIgnoreStoreKey); !ok {
-		// Check if the query is accessing system tables
 		if isSystemQuery(db.Statement.SQL.String()) {
 			return
 		}
-		s.mutex.Lock()
+
+		// Don't hold the lock while creating the ConnPool
+		var connPool gorm.ConnPool
+
+		s.mutex.RLock()
+		needGlobalIndex := s.globalIndices != nil && len(s.globalIndices.indices) > 0
+		s.mutex.RUnlock()
+
 		if db.Statement.ConnPool != nil {
-			if s.globalIndices != nil && len(s.globalIndices.indices) > 0 {
-				// Wrap the connection pool with our global index-aware version
-				db.Statement.ConnPool = NewConnPoolWithGlobalIndex(db.Statement.ConnPool, s)
+			if needGlobalIndex {
+				connPool = NewConnPoolWithGlobalIndex(db.Statement.ConnPool, s)
 			} else {
-				// Use the original connection pool as-is
-				s.ConnPool = &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s}
-				db.Statement.ConnPool = s.ConnPool
+				pool := &ConnPool{ConnPool: db.Statement.ConnPool, sharding: s}
+				s.mutex.Lock()
+				s.ConnPool = pool
+				s.mutex.Unlock()
+				connPool = pool
 			}
+
+			db.Statement.ConnPool = connPool
 		}
-		s.mutex.Unlock()
 	}
 }
 
@@ -445,7 +453,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		isSelect = true
 		selectStmt = stmtNode.SelectStmt
 		tables = collectTablesFromSelect(selectStmt)
-		//log.Printf("Tables extracted from SELECT: %v", tables)
+		log.Printf("Tables extracted from SELECT: %v", tables)
 		if selectStmt.WhereClause != nil {
 			conditions = append(conditions, selectStmt.WhereClause)
 		}
