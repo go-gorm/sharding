@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	)
 	// Get the query resolution without holding a lock
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
-	//fmt.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
+	fmt.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
 
 	// Store the last query safely
 	pool.sharding.querys.Store("last_query", stQuery)
@@ -77,7 +78,8 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 	var curTime = time.Now()
 
 	// Get the query resolution without locking
-	_, stQuery, table, err := pool.sharding.resolve(query, args...)
+	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
+	fmt.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
 
 	// Check for ErrInsertDiffSuffix first and return it immediately
 	if err != nil && errors.Is(err, ErrInsertDiffSuffix) {
@@ -140,8 +142,8 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 
 func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	// Get the query resolution without holding a lock
-	_, stQuery, table, err := pool.sharding.resolve(query, args...)
-	//fmt.Printf("QueryRowContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
+	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
+	fmt.Printf("QueryRowContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
 	pool.sharding.querys.Store("last_query", stQuery)
 
 	// Check if this is an INSERT operation for double write
