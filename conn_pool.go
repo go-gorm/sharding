@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -33,8 +32,10 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	)
 	// Get the query resolution without holding a lock
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
-	fmt.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
+	//fmt.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
 
+	// Store the last query safely
+	pool.sharding.querys.Store("last_query", stQuery)
 	// Handle errors with DoubleWrite fallback
 	if err != nil {
 		if errors.Is(err, ErrMissingShardingKey) && table != "" {
@@ -52,9 +53,6 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 		}
 		return nil, err
 	}
-
-	// Store the last query safely
-	pool.sharding.querys.Store("last_query", stQuery)
 
 	// Execute the main table query FIRST if DoubleWrite is enabled
 	if table != "" {
@@ -86,6 +84,9 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 		return nil, err
 	}
 
+	// Store the query safely using sync.Map
+	pool.sharding.querys.Store("last_query", stQuery)
+
 	// Thread-safe access to configs
 	var doubleWrite bool
 	if table != "" && err != nil && errors.Is(err, ErrMissingShardingKey) {
@@ -112,8 +113,6 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 		return nil, err
 	}
 
-	// Store the query safely using sync.Map
-	pool.sharding.querys.Store("last_query", stQuery)
 	isInsert := strings.Contains(strings.ToUpper(query), "INSERT INTO")
 	if isInsert && table != "" {
 		if r, ok := pool.sharding.configs[table]; ok && r.DoubleWrite {
@@ -141,8 +140,9 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 
 func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	// Get the query resolution without holding a lock
-	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
-	fmt.Printf("QueryRowContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
+	_, stQuery, table, err := pool.sharding.resolve(query, args...)
+	//fmt.Printf("QueryRowContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
+	pool.sharding.querys.Store("last_query", stQuery)
 
 	// Check if this is an INSERT operation for double write
 	isInsert := strings.Contains(strings.ToUpper(query), "INSERT INTO")
@@ -164,8 +164,6 @@ func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...
 			// We don't check for errors because QueryRowContext can't return them
 		}
 	}
-
-	pool.sharding.querys.Store("last_query", stQuery)
 
 	return pool.ConnPool.QueryRowContext(ctx, stQuery, args...)
 }
