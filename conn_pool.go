@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -33,8 +32,10 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	)
 	// Get the query resolution without holding a lock
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
-	fmt.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
-
+	pool.sharding.mutex.Lock()
+	log.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",
+		ftQuery, stQuery, query, table, err)
+	pool.sharding.mutex.Unlock()
 	// Store the last query safely
 	pool.sharding.querys.Store("last_query", stQuery)
 	// Handle errors with DoubleWrite fallback
@@ -79,8 +80,10 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 
 	// Get the query resolution without locking
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
-	fmt.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
-
+	pool.sharding.mutex.Lock()
+	log.Printf("QueryContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",
+		ftQuery, stQuery, query, table, err)
+	pool.sharding.mutex.Unlock()
 	// Check for ErrInsertDiffSuffix first and return it immediately
 	if err != nil && errors.Is(err, ErrInsertDiffSuffix) {
 		return nil, err
@@ -143,7 +146,10 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	// Get the query resolution without holding a lock
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
-	fmt.Printf("QueryRowContext: FtQuery: %s\n StQuery: %s \n	Query: %s \n Table: %s. Error: %s", ftQuery, stQuery, query, table, err)
+	pool.sharding.mutex.Lock()
+	log.Printf("QueryRowContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",
+		ftQuery, stQuery, query, table, err)
+	pool.sharding.mutex.Unlock()
 	pool.sharding.querys.Store("last_query", stQuery)
 
 	// Check if this is an INSERT operation for double write

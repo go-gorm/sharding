@@ -346,7 +346,8 @@ func (s *Sharding) Initialize(db *gorm.DB) error {
 	}
 
 	// Initialize the query rewriter with default options
-	s.queryRewriter = NewQueryRewriter(s, DefaultQueryRewriteOptions())
+	// todo for indices
+	//s.queryRewriter = NewQueryRewriter(s, DefaultQueryRewriteOptions())
 
 	return nil
 }
@@ -369,17 +370,17 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 			return
 		}
 
-		stmt := db.Statement
-		if stmt.Schema != nil && stmt.Schema.Table != "" {
-			s.mutex.RLock()
-			_, tableRegistered := s.configs[stmt.Schema.Table]
-			s.mutex.RUnlock()
-
-			// If table is not registered for sharding, skip applying sharding logic
-			if !tableRegistered {
-				return
-			}
-		}
+		//stmt := db.Statement
+		//if stmt.Schema != nil && stmt.Schema.Table != "" {
+		//	s.mutex.RLock()
+		//	_, tableRegistered := s.configs[stmt.Schema.Table]
+		//	s.mutex.RUnlock()
+		//
+		//	// If table is not registered for sharding, skip applying sharding logic
+		//	if !tableRegistered {
+		//		return
+		//	}
+		//}
 
 		// Don't hold the lock while creating the ConnPool
 		var connPool gorm.ConnPool
@@ -407,6 +408,7 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 // resolve splits the old query into full table query and sharding table query
 func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName string, err error) {
 	// Check if this is a direct query to a sharded table
+	log.Printf("RESOLVE FUNCTION ENTRY: Analyzing query: %s", query)
 	for baseTable, config := range s.configs {
 		// Get all suffixes for this table
 		suffixes := config.ShardingSuffixs()
@@ -439,21 +441,24 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 	}
 
 	// Extract table name from query
-	extractedTableName, err := extractTableNameFromQuery(query)
-	if err != nil {
-		// If we can't extract a table name, just return the original query
-		return query, query, tableName, nil
-	}
-
-	//fmt.Println("extractedTableName", extractedTableName)
-	// Check if the table is registered for sharding
-	s.mutex.RLock()
-	_, registered := s.configs[extractedTableName]
-	s.mutex.RUnlock()
-	if !registered {
-		// If table is not registered, return the original query
-		return query, query, extractedTableName, nil
-	}
+	//extractedTableName, err := extractTableNameFromQuery(query)
+	//if err != nil {
+	//	fmt.Println("extractTableNameFromQuery error", err)
+	//	// If we can't extract a table name, just return the original query
+	//	return query, query, tableName, nil
+	//}
+	//
+	////fmt.Println("extractedTableName", extractedTableName)
+	//// Check if the table is registered for sharding
+	//s.mutex.RLock()
+	//_, registered := s.configs[extractedTableName]
+	//s.mutex.RUnlock()
+	//
+	//log.Printf("Extracted table name: %s", extractedTableName)
+	//if !registered {
+	//	// If table is not registered, return the original query
+	//	return query, query, extractedTableName, nil
+	//}
 
 	// Parse the SQL query using pg_query_go
 	parsed, err := pg_query.Parse(query)
@@ -483,7 +488,6 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		isSelect = true
 		selectStmt = stmtNode.SelectStmt
 		tables = collectTablesFromSelect(selectStmt)
-		log.Printf("Tables extracted from SELECT: %v", tables)
 		if selectStmt.WhereClause != nil {
 			conditions = append(conditions, selectStmt.WhereClause)
 		}
@@ -685,7 +689,32 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			}
 			var aliasMap map[string]string
 			if isSelect {
-				aliasMap = collectTableAliases(selectStmt)
+				tables = collectTablesFromSelect(selectStmt)
+
+				// Add logging before and after extracting sharding keys
+				for _, table := range tables {
+					if cfg, ok := s.configs[table]; ok {
+						shardingKey := cfg.ShardingKey
+						value, id, keyFound, err := s.extractShardingKeyFromConditions(shardingKey, conditions, args, aliasMap, table)
+						log.Printf("For table %s: keyFound=%v, value=%v, id=%v, err=%v", table, keyFound, value, id, err)
+
+						// Log when suffix is determined
+						if keyFound || (id != 0) {
+							suffix, err := getSuffix(value, id, keyFound, cfg)
+							log.Printf("For table %s: suffix=%s, err=%v", table, suffix, err)
+
+							// Log the updating of tableMap
+							shardedTableName := table + suffix
+							log.Printf("Adding to tableMap: %s -> %s", table, shardedTableName)
+							tableMap[table] = shardedTableName
+						}
+					} else {
+						log.Printf("No config found for table %s", table)
+					}
+				}
+
+				// After building tableMap
+				log.Printf("Final tableMap for SELECT: %v", tableMap)
 			}
 
 			// Extract sharding key for the current table
@@ -1121,6 +1150,7 @@ func toInt64(value interface{}) (int64, error) {
 func collectTablesFromSelect(selectStmt *pg_query.SelectStmt) []string {
 	var tables []string
 	for _, fromItem := range selectStmt.FromClause {
+
 		switch node := fromItem.Node.(type) {
 		case *pg_query.Node_RangeVar:
 			tables = append(tables, node.RangeVar.Relname)
@@ -1169,6 +1199,8 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 	switch n := node.Node.(type) {
 	case *pg_query.Node_RangeVar:
 		if n.RangeVar.Schemaname != "" {
+			log.Printf("Skipping schema-qualified table: %s.%s", n.RangeVar.Schemaname, n.RangeVar.Relname)
+
 			// Do not replace schema-qualified table names
 			return
 		}
@@ -1277,6 +1309,7 @@ func replaceTableNames(node *pg_query.Node, tableMap map[string]string) {
 }
 
 func replaceSelectStmtTableName(selectStmt *pg_query.SelectStmt, tableMap map[string]string) {
+
 	// Recursively process FROM clause and other relevant clauses
 	for _, item := range selectStmt.FromClause {
 		replaceTableNames(item, tableMap)
