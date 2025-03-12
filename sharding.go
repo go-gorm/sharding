@@ -783,6 +783,14 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 			break
 		}
 
+		// If no direct equality found, look for the sharding key in composite IN conditions
+		// This handles ((col1, col2, ...)) IN ((val1, val2, ...)) pattern
+		keyFound, value, err = extractShardingKeyFromCompositeIn(shardingKey, condition, args, knownKeys)
+		if keyFound || err != nil {
+			log.Printf("Composite IN condition found for sharding key %s: value=%v, err=%v", shardingKey, value, err)
+			return value, id, keyFound, err
+		}
+
 		// check for "is_" boolean fields
 		if config.PartitionType == PartitionTypeList {
 			// Check for boolean fields like "is_erc20", "is_erc721", etc.
@@ -843,6 +851,70 @@ func (s *Sharding) extractShardingKeyFromConditions(shardingKey string, conditio
 	}
 
 	return value, id, keyFound, err
+}
+
+func extractShardingKeyFromCompositeIn(shardingKey string, node *pg_query.Node, args []interface{}, knownKeys map[string]interface{}) (keyFound bool, value interface{}, err error) {
+	if node == nil {
+		return false, nil, nil
+	}
+
+	switch n := node.Node.(type) {
+	case *pg_query.Node_AExpr:
+		if n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_IN {
+			// This is an IN expression
+			log.Printf("Found IN expression")
+
+			// Check the left side (columns) of the IN expression
+			if row, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_RowExpr); ok {
+				log.Printf("Found row expression with %d args", len(row.RowExpr.Args))
+
+				// Check each column in the composite key to see if it matches our sharding key
+				for colIndex, colNode := range row.RowExpr.Args {
+					if colRef, ok := colNode.Node.(*pg_query.Node_ColumnRef); ok {
+						colName := extractColumnName(colRef.ColumnRef, nil)
+						log.Printf("Column at position %d: %s", colIndex, colName)
+
+						// If this column matches our sharding key, extract the value from the right side
+						if getColumnNameWithoutTable(colName) == shardingKey {
+							log.Printf("Found sharding key %s in composite IN at position %d", shardingKey, colIndex)
+
+							// Handle the right side based on its type
+							switch rexpr := n.AExpr.Rexpr.Node.(type) {
+							case *pg_query.Node_List:
+								// List of RowExprs or other values
+								log.Printf("Right side is a list with %d items", len(rexpr.List.Items))
+								if len(rexpr.List.Items) > 0 {
+									if firstRow, ok := rexpr.List.Items[0].Node.(*pg_query.Node_RowExpr); ok {
+										// Extract the value at the same position as our sharding key
+										if colIndex < len(firstRow.RowExpr.Args) {
+											valueNode := firstRow.RowExpr.Args[colIndex]
+											log.Printf("Extracting value from position %d", colIndex)
+											value, err := extractValueFromExpr(valueNode, args)
+											return true, value, err
+										}
+									}
+								}
+							case *pg_query.Node_RowExpr:
+								// Single RowExpr
+								log.Printf("Right side is a row expression with %d items", len(rexpr.RowExpr.Args))
+								if colIndex < len(rexpr.RowExpr.Args) {
+									valueNode := rexpr.RowExpr.Args[colIndex]
+									value, err := extractValueFromExpr(valueNode, args)
+									return true, value, err
+								}
+							case *pg_query.Node_SubLink:
+								// Subquery - currently not supported
+								log.Printf("Right side is a subquery (not supported)")
+								return false, nil, fmt.Errorf("subquery in composite IN not supported")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return false, nil, nil
 }
 
 func collectJoinConditions(selectStmt *pg_query.SelectStmt) []*pg_query.Node {
