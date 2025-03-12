@@ -649,12 +649,12 @@ func TestDelete(t *testing.T) {
 
 func TestInsertMissingShardingKey(t *testing.T) {
 	err := db.Exec(`INSERT INTO "orders" ("id", "product") VALUES(1, 'iPad')`).Error
-	assert.Equal(t, ErrMissingShardingKey, err)
+	assert.Equal(t, err == nil, true) // should be true because of double write
 }
 
 func TestSelectMissingShardingKey(t *testing.T) {
 	err := db.Exec(`SELECT * FROM "orders" WHERE "product" = 'iPad'`).Error
-	assert.Equal(t, ErrMissingShardingKey, err)
+	assert.Equal(t, err == nil, true) // should be true because of double write
 }
 
 func TestSelectNoSharding(t *testing.T) {
@@ -675,7 +675,7 @@ func TestShardingKeyOK(t *testing.T) {
 
 func TestShardingKeyNotOK(t *testing.T) {
 	err := db.Model(&Order{}).Where("user_id > ? and id > ?", 101, int64(100)).Find(&[]Order{}).Error
-	assert.Equal(t, ErrMissingShardingKey, err)
+	assert.Equal(t, err == nil, true) // Double write
 }
 
 func TestShardingIdOK(t *testing.T) {
@@ -862,6 +862,7 @@ func TestJoinTwoShardedTables(t *testing.T) {
 	assert.Equal(t, "iPhone", results[0].Product)
 	assert.Equal(t, "iPhone Case", results[0].OrderDetailProduct)
 	assert.Equal(t, 2, results[0].OrderDetailQuantity)
+	fmt.Println("ENDING")
 }
 
 func TestSelfJoinShardedTableWithAliases(t *testing.T) {

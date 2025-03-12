@@ -445,6 +445,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 		isSelect = true
 		selectStmt = stmtNode.SelectStmt
 		tables = collectTablesFromSelect(selectStmt)
+		//log.Printf("Tables extracted from SELECT: %v", tables)
 		if selectStmt.WhereClause != nil {
 			conditions = append(conditions, selectStmt.WhereClause)
 		}
@@ -468,6 +469,9 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 			// If no sharding key found
 			if !hasShardingKey {
+				if tableName == "" && len(tables) > 0 {
+					tableName = tables[0]
+				}
 				return ftQuery, stQuery, tableName, ErrMissingShardingKey
 			}
 		}
@@ -662,6 +666,7 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			shardedTableName := originalTableName + suffix
 			tableMap[originalTableName] = shardedTableName
 		}
+
 	}
 
 	// Traverse the AST and replace original table names with sharded table names
