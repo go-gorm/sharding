@@ -2181,10 +2181,19 @@ func TestConcurrentConnPoolOperations(t *testing.T) {
 			ShardingKey:         "user_id",
 			NumberOfShards:      4,
 			PrimaryKeyGenerator: PKSnowflake,
-			ShardingSuffixs: func() (suffixs []string) {
-				return []string{"_0", "_1", "_2"}
-			},
 		}
+	}
+
+	for tableName, config := range configs {
+		config.ShardingSuffixs = func() []string {
+			var suffixes []string
+			for j := 0; j < int(config.NumberOfShards); j++ {
+				suffixes = append(suffixes, fmt.Sprintf("_%d", j))
+			}
+			return suffixes
+		}
+		// We need to reassign because we're copying the struct
+		configs[tableName] = config
 	}
 
 	// Register our middleware with multiple table configs
@@ -2195,6 +2204,29 @@ func TestConcurrentConnPoolOperations(t *testing.T) {
 	err = testDB.AutoMigrate(&Order{})
 	if err != nil {
 		t.Fatalf("Failed to migrate: %v", err)
+	}
+
+	// Create the concurrent tables and their sharded versions before testing
+	for i := 0; i < 5; i++ {
+		// Create the main table
+		tableName := fmt.Sprintf("concurrent_table_%d", i)
+		testDB.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName))
+		testDB.Exec(fmt.Sprintf(`CREATE TABLE %s (
+			id bigint PRIMARY KEY,
+			user_id bigint,
+			product text
+		)`, tableName))
+
+		// Create the sharded tables
+		for j := 0; j < 4; j++ {
+			shardedTable := fmt.Sprintf("%s_%d", tableName, j)
+			testDB.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", shardedTable))
+			testDB.Exec(fmt.Sprintf(`CREATE TABLE %s (
+				id bigint PRIMARY KEY,
+				user_id bigint,
+				product text
+			)`, shardedTable))
+		}
 	}
 
 	// Create connection pool implementation for testing
@@ -2312,6 +2344,17 @@ func TestConcurrentConnPoolOperations(t *testing.T) {
 		// Timeout for safety
 		cancel()
 		t.Fatal("Test timed out after 30 seconds")
+	}
+
+	// Clean up tables after testing
+	for i := 0; i < 5; i++ {
+		tableName := fmt.Sprintf("concurrent_table_%d", i)
+		testDB.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName))
+
+		for j := 0; j < 4; j++ {
+			shardedTable := fmt.Sprintf("%s_%d", tableName, j)
+			testDB.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", shardedTable))
+		}
 	}
 
 	// If we made it here without any reported errors, the test passes
