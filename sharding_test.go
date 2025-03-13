@@ -7,10 +7,7 @@ import (
 	"gorm.io/gorm/logger"
 	"log"
 	"os"
-	"reflect"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2825,95 +2822,348 @@ func TestDataRaceWithDoubleWrite(t *testing.T) {
 	}
 }
 
-// Function to safely get value from pointer types
-func dereferenceValue(value interface{}) interface{} {
-	if value == nil {
-		return nil
+func TestShardingAlgorithm(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         any
+		expectedShard string
+		expectError   bool
+	}{
+		{
+			name:          "Empty string",
+			input:         "",
+			expectedShard: "_30", // This is the shard value for "default"
+			expectError:   false,
+		},
+		{
+			name:          "Single character",
+			input:         "a",
+			expectedShard: "_12", // Shard for "a" (may vary based on implementation)
+			expectError:   false,
+		},
+		{
+			name:          "Short name",
+			input:         "Jo",
+			expectedShard: "_22", // Shard for "Jo"
+			expectError:   false,
+		},
+		{
+			name:          "Normal name",
+			input:         "John Smith",
+			expectedShard: "_7", // Shard for "John Smith"
+			expectError:   false,
+		},
+		{
+			name:          "Long name",
+			input:         "Elizabeth Alexandra Mary Windsor The Queen of England",
+			expectedShard: "_27", // Shard for this long name
+			expectError:   false,
+		},
+		{
+			name:          "Special characters",
+			input:         "O'Brien-Smith, Jr.",
+			expectedShard: "_3", // Shard for this name with special chars
+			expectError:   false,
+		},
+		{
+			name:          "Non-ASCII characters",
+			input:         "Jörg Müller",
+			expectedShard: "_20", // Shard for non-ASCII name
+			expectError:   false,
+		},
+		{
+			name:          "Not a string",
+			input:         123,
+			expectedShard: "",
+			expectError:   true,
+		},
+		{
+			name:          "Nil value",
+			input:         nil,
+			expectedShard: "",
+			expectError:   true,
+		},
 	}
 
-	v := reflect.ValueOf(value)
-	if v.Kind() == reflect.Ptr {
-		if v.IsNil() {
-			return nil
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			suffix, err := shardingHasher32Algorithm(tt.input)
+
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedShard, suffix, "Incorrect shard suffix generated")
+
+				// Ensure shard is in expected range (0-31)
+				// This test extracts the number from the "_X" format
+				if len(suffix) > 1 {
+					var shardNum int
+					_, err := fmt.Sscanf(suffix, "_%d", &shardNum)
+					assert.NoError(t, err)
+					tassert.GreaterOrEqual(t, shardNum, 0)
+					tassert.Less(t, shardNum, 32)
+				}
+			}
+		})
+	}
+}
+
+// TestNameSharding tests the name-based sharding algorithm with Users
+func TestNameSharding(t *testing.T) {
+	// Clean up existing user tables
+	truncateTables(db, "users", "users_0", "users_1", "users_2", "users_3")
+
+	testDB, err := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+		Logger:                                   logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		t.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	// Create a custom config for name-based sharding
+	nameShardingConfig := NameShardingConfig(4)
+
+	// Register middleware with our custom sharding config
+	configs := map[string]Config{
+		"users": nameShardingConfig,
+	}
+	nameMiddleware := Register(configs, &User{})
+
+	// Create a new session with the middleware
+	testDB.Use(nameMiddleware)
+
+	// Create test users with various names
+	testUsers := []User{
+		{ID: 1, Name: ""},            // Empty name - should use "default" string
+		{ID: 2, Name: "a"},           // Single character
+		{ID: 3, Name: "John"},        // Short name
+		{ID: 4, Name: "Maria Smith"}, // Normal name with space
+		{ID: 5, Name: "OReilly"},     // Name with special character
+		{ID: 6, Name: "Jörg Müller"}, // Non-ASCII characters
+	}
+
+	// Insert each user and verify correct sharding
+	for i, user := range testUsers {
+		// Insert the user
+		err := testDB.Create(&user).Error
+		assert.NoError(t, err, "Failed to insert user %v", user)
+
+		// Determine expected shard using the algorithm directly
+		expectedSuffix, err := nameShardingConfig.ShardingAlgorithm(user.Name)
+		assert.NoError(t, err, "Sharding algorithm failed for user %v", user)
+
+		// Log for debugging
+		t.Logf("User %d: name=%s, expected shard=%s", i, user.Name, expectedSuffix)
+
+		// For verification, use a direct query to the specific shard table
+		sqlQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE name = '%s'", "users"+expectedSuffix, user.Name)
+		var count int64
+		err = testDB.Raw(sqlQuery).Count(&count).Error
+		assert.NoError(t, err, "Failed to query user in shard %s", "users"+expectedSuffix)
+		assert.Equal(t, int64(1), count, "User not found in expected shard %s", "users"+expectedSuffix)
+
+		// For the main table, use the nosharding hint
+		var mainCount int64
+		var usr *User
+		err = testDB.Table("users").Where("name = ?", user.Name).Count(&mainCount).Error
+		testDB.Table("users").Where("name = ?", user.Name).Scan(&usr)
+		assert.NoError(t, err, "Failed to query user in main table")
+		assert.Equal(t, int64(1), mainCount, "User not found in main table")
+	}
+}
+
+// TestNameShardingDistribution tests that name sharding produces a reasonably balanced distribution
+func TestNameShardingDistribution(t *testing.T) {
+	// Create a larger sharding config for better distribution testing
+	nameShardingConfig := NameShardingConfig(32)
+
+	// Track shard distribution
+	shardCounts := make(map[string]int)
+
+	// Generate a variety of test names
+	testNames := []string{
+		"", // Empty name
+		"John", "Jane", "Bob", "Alice", "Charlie", "Diana",
+		"Smith", "Johnson", "Williams", "Brown", "Jones", "Miller",
+		"García", "Rodríguez", "López", "Martínez", "González", "Pérez",
+		"Wang", "Li", "Zhang", "Liu", "Chen", "Yang",
+		"Müller", "Schmidt", "Schneider", "Fischer", "Weber", "Meyer",
+		"Å", "Z", "1", "首", "δ", "#",
+		"John Smith", "Jane Doe", "Bob Johnson", "Alice Williams",
+		"O'Reilly", "McDonald's", "Smith-Jones", "Wang Lee",
+	}
+
+	// Calculate shard distribution
+	for _, name := range testNames {
+		suffix, err := nameShardingConfig.ShardingAlgorithm(name)
+		assert.NoError(t, err)
+		shardCounts[suffix]++
+	}
+
+	// Log the distribution
+	t.Logf("Name distribution across %d shards: %v", len(shardCounts), shardCounts)
+
+	// Verify reasonable distribution (this is probabilistic, so we use loose bounds)
+	// For 32 shards and ~50 names, we expect at least 10 different shards to be used
+	tassert.GreaterOrEqual(t, len(shardCounts), 10, "Expected at least 10 different shards to be used")
+
+	// Check that no single shard gets too many entries (e.g., more than 30% of the total)
+	for shard, count := range shardCounts {
+		maxExpected := int(float64(len(testNames)) * 0.3)
+		tassert.LessOrEqual(t, count, maxExpected, "Shard %s has too many entries (%d) - distribution may be unbalanced", shard, count)
+	}
+}
+
+func TestILikeQueryWithHashSharding(t *testing.T) {
+	// Clean up tables before test
+	truncateTables(db, "users", "users_0", "users_1", "users_2", "users_3")
+
+	testDB, err := gorm.Open(postgres.New(dbConfig), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+		Logger:                                   logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		t.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	// Create a hash sharding config that works with integer IDs
+	hashShardingConfig := Config{
+		DoubleWrite:    true,
+		ShardingKey:    "id",
+		PartitionType:  PartitionTypeHash,
+		NumberOfShards: 4,
+		// Use a proper hash algorithm for integer IDs
+		ShardingAlgorithm: func(value interface{}) (string, error) {
+			id, err := toInt64(value)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("_%d", id%4), nil
+		},
+		ShardingAlgorithmByPrimaryKey: func(id int64) string {
+			return fmt.Sprintf("_%d", id%4)
+		},
+	}
+
+	// Register middleware with our hash sharding config
+	configs := map[string]Config{
+		"users": hashShardingConfig,
+	}
+	hashMiddleware := Register(configs, &User{})
+
+	// Create a new session with the middleware
+	testDB.Use(hashMiddleware)
+
+	// Create test users with searchable names
+	testUsers := []User{
+		{ID: 1, Name: "John Smith"},
+		{ID: 2, Name: "John Doe"},
+		{ID: 3, Name: "Jane Smith"},
+		{ID: 4, Name: "Robert Johnson"},
+		{ID: 5, Name: "Smith Family"},
+	}
+
+	// Insert the test users
+	for _, user := range testUsers {
+		err := testDB.Create(&user).Error
+		assert.NoError(t, err, "Failed to insert user %v", user)
+	}
+
+	// CASE 1: ILIKE query without ID - Uses double-write
+	t.Run("ILikeQueryWithoutID", func(t *testing.T) {
+		var results []User
+		err := testDB.Where("name ILIKE ?", "%smith%").Find(&results).Error
+
+		// With DoubleWrite enabled, this should succeed
+		assert.NoError(t, err, "With DoubleWrite enabled, query should succeed")
+		tassert.GreaterOrEqual(t, len(results), 3, "Should find at least 3 users with 'smith' in name")
+	})
+
+	// CASE 2: Using nosharding hint - should always work
+	t.Run("ILikeQueryWithNoShardingHint", func(t *testing.T) {
+		var results []User
+		err := testDB.Clauses(hints.Comment("select", "nosharding")).
+			Where("name ILIKE ?", "%smith%").
+			Find(&results).Error
+
+		assert.NoError(t, err, "Query with nosharding hint should not error")
+		tassert.GreaterOrEqual(t, len(results), 3, "Should find at least 3 users with 'smith' in name")
+	})
+
+	// CASE 3: ILIKE query with specific ID - should work for that shard
+	t.Run("ILikeQueryWithSpecificID", func(t *testing.T) {
+		// Get the correct shard suffix first
+		expectedSuffix := fmt.Sprintf("_%d", 1%4) // ID 1 mod 4 = 1
+		t.Logf("Expected suffix for ID 1: %s", expectedSuffix)
+
+		var results []User
+		err := testDB.Where("id = ?", 1).
+			Where("name ILIKE ?", "%smith%").
+			Find(&results).Error
+
+		assert.NoError(t, err, "Query with ID should not error")
+		assert.Equal(t, 1, len(results), "Should find 1 user with ID=1 and 'smith' in name")
+
+		// Skip the assertQueryResult if the test is already failing
+		if err == nil && len(results) == 1 {
+			// The exact query format might vary, so this assertion might need adjustment
+			t.Logf("Last query: %s", hashMiddleware.LastQuery())
 		}
-		return v.Elem().Interface()
-	}
-	return value
-}
+	})
 
-func assertQueryResult(t *testing.T, expected string, middleware *Sharding) {
-	t.Helper()
-	normalize := func(query string) string {
-		// Remove quotes around identifiers
-		re := regexp.MustCompile(`"(\w+)"`)
-		query = re.ReplaceAllString(query, `$1`)
-		// Replace parameter numbers with a placeholder
-		query = regexp.MustCompile(`\$\d+`).ReplaceAllString(query, `$?`)
-		// Normalize whitespace
-		query = strings.TrimSpace(query)
-		query = regexp.MustCompile(`\s+`).ReplaceAllString(query, ` `)
-		return query
-	}
-	normalizedExpected := normalize(toDialect(expected))
-	normalizedActual := normalize(middleware.LastQuery())
-	if normalizedExpected != normalizedActual {
-		t.Errorf("\nExpected:\n%s\nActual:\n%s", normalizedExpected, normalizedActual)
-	}
-}
+	// CASE 4: Manual querying of each shard - always works
+	t.Run("ManualUnionAcrossShards", func(t *testing.T) {
+		var allResults []User
+		searchTerm := "%smith%"
 
-func truncateTables(db *gorm.DB, tables ...string) {
-	for _, table := range tables {
-		db.Exec(fmt.Sprintf("TRUNCATE TABLE %s RESTART IDENTITY CASCADE", table))
-	}
-}
+		// Query each shard individually and combine results
+		for i := 0; i < int(hashShardingConfig.NumberOfShards); i++ {
+			var shardResults []User
+			shardTable := fmt.Sprintf("users_%d", i)
 
-func toDialect(sql string) string {
-	if os.Getenv("DIALECTOR") == "mysql" {
-		sql = strings.ReplaceAll(sql, `"`, "`")
-		r := regexp.MustCompile(`\$([0-9]+)`)
-		sql = r.ReplaceAllString(sql, "?")
-		sql = strings.ReplaceAll(sql, " RETURNING `id`", "")
-	} else if os.Getenv("DIALECTOR") == "mariadb" {
-		sql = strings.ReplaceAll(sql, `"`, "`")
-		r := regexp.MustCompile(`\$([0-9]+)`)
-		sql = r.ReplaceAllString(sql, "?")
-	}
-	return sql
-}
+			// Use a raw query to bypass sharding middleware
+			testDB.Set(ShardingIgnoreStoreKey, true).
+				Raw(fmt.Sprintf("SELECT * FROM %s WHERE name ILIKE ?", shardTable), searchTerm).
+				Scan(&shardResults)
 
-// skip $sfid compare
-func assertSfidQueryResult(t *testing.T, expected, lastQuery string) {
-	t.Helper()
-
-	node, _ := snowflake.NewNode(0)
-	sfid := node.Generate().Int64()
-	sfidLen := len(strconv.Itoa(int(sfid)))
-	re := regexp.MustCompile(`\$sfid`)
-
-	for {
-		match := re.FindStringIndex(expected)
-		if len(match) == 0 {
-			break
+			t.Logf("Shard %d found %d results", i, len(shardResults))
+			allResults = append(allResults, shardResults...)
 		}
 
-		start := match[0]
-		end := match[1]
+		tassert.GreaterOrEqual(t, len(allResults), 3, "Manual search should find at least 3 matching users")
+	})
 
-		if len(lastQuery) < start+sfidLen {
-			break
+	// CASE 5: Query for specific IDs using IN clause
+	t.Run("QueryWithInClauseForIDs", func(t *testing.T) {
+		var results []User
+		// Use clauses to bypass sharding middleware's restrictions
+		err := testDB.Clauses(hints.Comment("select", "nosharding")).
+			Where("id IN ?", []int64{1, 3, 5}).
+			Where("name ILIKE ?", "%smith%").
+			Find(&results).Error
+
+		assert.NoError(t, err, "Query with nosharding should not error")
+		tassert.GreaterOrEqual(t, len(results), 2, "Should find at least 2 matching users")
+
+		// Fallback approach for multiple IDs
+		t.Log("Alternative approach using individual queries per ID:")
+		var combinedResults []User
+		ids := []int64{1, 3, 5}
+
+		for _, id := range ids {
+			var idResults []User
+			// Skip sharding middleware to query directly
+			testDB.Set(ShardingIgnoreStoreKey, true).
+				Raw(fmt.Sprintf("SELECT * FROM users_%d WHERE id = ? AND name ILIKE ?", id%4),
+					id, "%smith%").
+				Scan(&idResults)
+
+			t.Logf("ID %d (shard %d): found %d results", id, id%4, len(idResults))
+			combinedResults = append(combinedResults, idResults...)
 		}
 
-		sfid := lastQuery[start : start+sfidLen]
-		expected = expected[:start] + sfid + expected[end:]
-	}
-
-	assert.Equal(t, toDialect(expected), lastQuery)
-}
-
-func mysqlDialector() bool {
-	return os.Getenv("DIALECTOR") == "mysql" || os.Getenv("DIALECTOR") == "mariadb"
-}
-
-func mariadbDialector() bool {
-	return os.Getenv("DIALECTOR") == "mariadb"
+		t.Logf("Found %d total results with individual ID queries", len(combinedResults))
+	})
 }

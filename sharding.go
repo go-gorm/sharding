@@ -407,9 +407,6 @@ func (s *Sharding) switchConn(db *gorm.DB) {
 
 // resolve splits the old query into full table query and sharding table query
 func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery, tableName string, err error) {
-	// Check if this is a direct query to a sharded table
-	log.Printf("RESOLVE FUNCTION ENTRY: Analyzing query: %s", query)
-
 	// Initialize return values to avoid nil pointers
 	ftQuery = query
 	stQuery = query
@@ -1138,21 +1135,19 @@ func (s *Sharding) extractInsertShardingKeyFromValues(r Config, insertStmt *pg_q
 		if err != nil {
 			return nil, 0, false, err
 		}
+		if strings.EqualFold(colName, r.ShardingKey) {
+			log.Printf("Found sharding key '%s' with value: %v", colName, exprValue)
+			value = exprValue
+			keyFound = true
+		}
 
 		if strings.ToLower(colName) == "id" {
 			idValue, err := toInt64(exprValue)
-			if err != nil {
-				return nil, 0, false, ErrInvalidID
+			if err == nil {
+				id = idValue
 			}
-			id = idValue
-			//log.Printf("ID found: %s = %v\n", colName, id)
 		}
 
-		if colName == r.ShardingKey {
-			value = exprValue
-			keyFound = true
-			//log.Printf("Sharding key found: %s = %v\n", colName, value)
-		}
 	}
 
 	// For list partitioning, we must have the list key
@@ -1738,7 +1733,7 @@ func getSuffix(value any, id int64, keyFound bool, r Config) (suffix string, err
 
 			return "", err
 		}
-		log.Printf("Sharding key value: %v, Suffix: %s\n", value, suffix)
+		//log.Printf("Sharding key value: %v, Suffix: %s\n", value, suffix)
 	} else if id != 0 {
 		// Use ID-based routing when no value or value is nil
 		if r.ShardingAlgorithmByPrimaryKey == nil {
@@ -1986,49 +1981,6 @@ func defaultHashAlgorithm(config *Config) func(value any) (string, error) {
 
 		return fmt.Sprintf(config.tableFormat, id%int(config.NumberOfShards)), nil
 	}
-}
-
-// extractTableNameFromQuery attempts to extract the primary table name from a SQL query
-func extractTableNameFromQuery(query string) (string, error) {
-	// Skip empty queries
-	if query == "" {
-		return "", fmt.Errorf("empty query")
-	}
-
-	// Try to parse with pg_query library for accurate AST-based extraction
-	parsed, err := pg_query.Parse(query)
-	if err != nil {
-		// Fallback to regex-based extraction if parsing fails
-		return extractTableNameWithRegex(query)
-	}
-
-	if len(parsed.Stmts) == 0 {
-		return "", fmt.Errorf("no statements found in query")
-	}
-
-	// Get the first statement
-	stmt := parsed.Stmts[0]
-
-	// Extract table name based on statement type
-	switch stmtNode := stmt.Stmt.Node.(type) {
-	case *pg_query.Node_SelectStmt:
-		return extractTableFromSelectStmt(stmtNode.SelectStmt)
-	case *pg_query.Node_InsertStmt:
-		if stmtNode.InsertStmt.Relation != nil {
-			return stmtNode.InsertStmt.Relation.Relname, nil
-		}
-	case *pg_query.Node_UpdateStmt:
-		if stmtNode.UpdateStmt.Relation != nil {
-			return stmtNode.UpdateStmt.Relation.Relname, nil
-		}
-	case *pg_query.Node_DeleteStmt:
-		if stmtNode.DeleteStmt.Relation != nil {
-			return stmtNode.DeleteStmt.Relation.Relname, nil
-		}
-	}
-
-	// Fallback to regex if we couldn't extract using AST
-	return extractTableNameWithRegex(query)
 }
 
 // extractTableFromSelectStmt extracts the primary table name from a SELECT statement
