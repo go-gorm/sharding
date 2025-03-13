@@ -1617,59 +1617,42 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 
 		if n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_LIKE ||
 			n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_ILIKE {
-			var leftColName, rightColName string
-			var leftValue, rightValue interface{}
-			var leftIsCol, rightIsCol bool
 
-			// Left expression
+			// Left side of the ILIKE operation
 			if colRef, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_ColumnRef); ok {
-				leftColName = extractColumnName(colRef.ColumnRef, aliasMap)
-				leftIsCol = true
-			} else {
-				leftValue, _ = extractValueFromExpr(n.AExpr.Lexpr, args)
+				colName := extractColumnName(colRef.ColumnRef, aliasMap)
+
+				// Check if this is our sharding key
+				if getColumnNameWithoutTable(colName) == shardingKey {
+					// For ILIKE operations, we'll use a wildcard match
+					// Extract the search term from the right side if possible
+					if valueExpr, err := extractValueFromExpr(n.AExpr.Rexpr, args); err == nil && valueExpr != nil {
+						return true, valueExpr, nil
+					}
+
+					// Handle concatenation scenarios like: col ILIKE '%' || param || '%'
+					if opExpr, ok := n.AExpr.Rexpr.Node.(*pg_query.Node_AExpr); ok && len(opExpr.AExpr.Name) > 0 {
+						if opExpr.AExpr.Name[0].Node.(*pg_query.Node_String_).String_.Sval == "||" {
+							// This is a concatenation - attempt to extract the search term
+							if searchTerm, err := extractSearchTermFromConcatenation(opExpr.AExpr, args); err == nil {
+								return true, searchTerm, nil
+							}
+						}
+					}
+				}
 			}
 
-			// Right expression
+			// Right side of the ILIKE operation (less common, but possible)
 			if colRef, ok := n.AExpr.Rexpr.Node.(*pg_query.Node_ColumnRef); ok {
-				rightColName = extractColumnName(colRef.ColumnRef, aliasMap)
-				rightIsCol = true
-			} else {
-				rightValue, _ = extractValueFromExpr(n.AExpr.Rexpr, args)
-			}
+				colName := extractColumnName(colRef.ColumnRef, aliasMap)
 
-			// Extract clean terms from patterns
-			if !leftIsCol && rightIsCol {
-				// Pattern on left, column on right
-				if strPattern, ok := leftValue.(string); ok {
-					leftValue = extractKeyFromPattern(strPattern)
+				// Check if this is our sharding key
+				if getColumnNameWithoutTable(colName) == shardingKey {
+					// Extract from left side
+					if valueExpr, err := extractValueFromExpr(n.AExpr.Lexpr, args); err == nil && valueExpr != nil {
+						return true, valueExpr, nil
+					}
 				}
-			} else if leftIsCol && !rightIsCol {
-				// Column on left, pattern on right
-				if strPattern, ok := rightValue.(string); ok {
-					rightValue = extractKeyFromPattern(strPattern)
-				}
-			}
-
-			// Store values in known keys
-			if leftIsCol && !rightIsCol {
-				storeKnownKey(knownKeys, leftColName, rightValue)
-				// Direct check for sharding key
-				if getColumnNameWithoutTable(leftColName) == shardingKey {
-					return true, rightValue, nil
-				}
-			}
-			if rightIsCol && !leftIsCol {
-				storeKnownKey(knownKeys, rightColName, leftValue)
-
-				// Direct check for sharding key
-				if getColumnNameWithoutTable(rightColName) == shardingKey {
-					return true, leftValue, nil
-				}
-			}
-
-			// Check known keys as well
-			if val, exists := knownKeys[shardingKey]; exists {
-				return true, val, nil
 			}
 		}
 
@@ -1840,6 +1823,78 @@ func collectAliasesFromNode(node *pg_query.Node, aliasMap map[string]string) {
 		collectAliasesFromNode(n.JoinExpr.Larg, aliasMap)
 		collectAliasesFromNode(n.JoinExpr.Rarg, aliasMap)
 	}
+}
+
+// Helper function to extract search term from concatenation operators
+func extractSearchTermFromConcatenation(aExpr *pg_query.A_Expr, args []interface{}) (string, error) {
+	// Handle simple cases like: '%' || $1 || '%'
+	if len(aExpr.Name) > 0 && aExpr.Name[0].Node.(*pg_query.Node_String_).String_.Sval == "||" {
+		// Try to extract the parameter in the middle
+		if _, ok := aExpr.Rexpr.Node.(*pg_query.Node_AExpr); ok {
+			// This is the second || operator in '%' || $1 || '%'
+			lValue, err := extractValueFromExpr(aExpr.Lexpr, args)
+			if err == nil && lValue != nil {
+				// Found the middle parameter, it's the Lexpr of the second || operator
+				return fmt.Sprintf("%v", lValue), nil
+			}
+		} else {
+			// This might be a direct parameter
+			rValue, err := extractValueFromExpr(aExpr.Rexpr, args)
+			if err == nil && rValue != nil {
+				return fmt.Sprintf("%v", rValue), nil
+			}
+		}
+	}
+
+	// Handle more complex cases through recursive traversal
+	searchParts := extractAllValuesFromConcatenation(aExpr, args)
+	if len(searchParts) > 0 {
+		return strings.Join(searchParts, ""), nil
+	}
+
+	return "", fmt.Errorf("could not extract search term from concatenation")
+}
+
+// Recursively extracts all string values from a concatenation expression tree
+func extractAllValuesFromConcatenation(aExpr *pg_query.A_Expr, args []interface{}) []string {
+	if aExpr == nil || len(aExpr.Name) == 0 {
+		return nil
+	}
+
+	opName := aExpr.Name[0].Node.(*pg_query.Node_String_).String_.Sval
+	if opName != "||" {
+		return nil
+	}
+
+	var parts []string
+
+	// Process left side
+	if leftVal, err := extractValueFromExpr(aExpr.Lexpr, args); err == nil && leftVal != nil {
+		if strVal, ok := leftVal.(string); ok {
+			// Skip wildcards in pattern matching for the purpose of sharding
+			if strVal != "%" && strVal != "_" {
+				parts = append(parts, strVal)
+			}
+		}
+	} else if leftExpr, ok := aExpr.Lexpr.Node.(*pg_query.Node_AExpr); ok {
+		// Recursive concatenation on left side
+		parts = append(parts, extractAllValuesFromConcatenation(leftExpr.AExpr, args)...)
+	}
+
+	// Process right side
+	if rightVal, err := extractValueFromExpr(aExpr.Rexpr, args); err == nil && rightVal != nil {
+		if strVal, ok := rightVal.(string); ok {
+			// Skip wildcards in pattern matching for the purpose of sharding
+			if strVal != "%" && strVal != "_" {
+				parts = append(parts, strVal)
+			}
+		}
+	} else if rightExpr, ok := aExpr.Rexpr.Node.(*pg_query.Node_AExpr); ok {
+		// Recursive concatenation on right side
+		parts = append(parts, extractAllValuesFromConcatenation(rightExpr.AExpr, args)...)
+	}
+
+	return parts
 }
 
 func collectAliasesFromJoin(joinExpr *pg_query.JoinExpr) map[string]string {
