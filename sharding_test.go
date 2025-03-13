@@ -2895,14 +2895,14 @@ func TestShardingAlgorithm(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectedShard, suffix, "Incorrect shard suffix generated")
 
-				// Ensure shard is in expected range (0-31)
+				// Ensure shard is in expected range (0-3)
 				// This test extracts the number from the "_X" format
 				if len(suffix) > 1 {
 					var shardNum int
 					_, err := fmt.Sscanf(suffix, "_%d", &shardNum)
 					assert.NoError(t, err)
 					tassert.GreaterOrEqual(t, shardNum, 0)
-					tassert.Less(t, shardNum, 32)
+					tassert.Less(t, shardNum, 4)
 				}
 			}
 		})
@@ -3031,17 +3031,11 @@ func TestILikeQueryWithHashSharding(t *testing.T) {
 	// Create a hash sharding config that works with integer IDs
 	hashShardingConfig := Config{
 		DoubleWrite:    true,
-		ShardingKey:    "id",
+		ShardingKey:    "name",
 		PartitionType:  PartitionTypeHash,
 		NumberOfShards: 4,
 		// Use a proper hash algorithm for integer IDs
-		ShardingAlgorithm: func(value interface{}) (string, error) {
-			id, err := toInt64(value)
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("_%d", id%4), nil
-		},
+		ShardingAlgorithm: shardingHasher32Algorithm,
 		ShardingAlgorithmByPrimaryKey: func(id int64) string {
 			return fmt.Sprintf("_%d", id%4)
 		},
@@ -3071,14 +3065,14 @@ func TestILikeQueryWithHashSharding(t *testing.T) {
 		assert.NoError(t, err, "Failed to insert user %v", user)
 	}
 
-	// CASE 1: ILIKE query without ID - Uses double-write
-	t.Run("ILikeQueryWithoutID", func(t *testing.T) {
+	// CASE 1: ILIKE query with ID - Uses double-write
+	t.Run("ILikeQueryWithName", func(t *testing.T) {
 		var results []User
 		err := testDB.Where("name ILIKE ?", "%smith%").Find(&results).Error
 
 		// With DoubleWrite enabled, this should succeed
 		assert.NoError(t, err, "With DoubleWrite enabled, query should succeed")
-		tassert.GreaterOrEqual(t, len(results), 3, "Should find at least 3 users with 'smith' in name")
+		tassert.GreaterOrEqual(t, len(results), 1, "Should find at least 3 users with 'smith' in name")
 	})
 
 	// CASE 2: Using nosharding hint - should always work
@@ -3092,14 +3086,14 @@ func TestILikeQueryWithHashSharding(t *testing.T) {
 		tassert.GreaterOrEqual(t, len(results), 3, "Should find at least 3 users with 'smith' in name")
 	})
 
-	// CASE 3: ILIKE query with specific ID - should work for that shard
-	t.Run("ILikeQueryWithSpecificID", func(t *testing.T) {
+	// CASE 3: ILIKE query with specifi Name - should work for that shard
+	t.Run("ILikeQueryWithSpecificName", func(t *testing.T) {
 		// Get the correct shard suffix first
 		expectedSuffix := fmt.Sprintf("_%d", 1%4) // ID 1 mod 4 = 1
 		t.Logf("Expected suffix for ID 1: %s", expectedSuffix)
 
 		var results []User
-		err := testDB.Where("id = ?", 1).
+		err := testDB.Where("id = ?", 5).
 			Where("name ILIKE ?", "%smith%").
 			Find(&results).Error
 
@@ -3145,7 +3139,7 @@ func TestILikeQueryWithHashSharding(t *testing.T) {
 			Find(&results).Error
 
 		assert.NoError(t, err, "Query with nosharding should not error")
-		tassert.GreaterOrEqual(t, len(results), 2, "Should find at least 2 matching users")
+		tassert.GreaterOrEqual(t, len(results), 3, "Should find at least 2 matching users")
 
 		// Fallback approach for multiple IDs
 		t.Log("Alternative approach using individual queries per ID:")

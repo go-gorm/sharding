@@ -702,8 +702,8 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 					if ok {
 						shardingKey := cfg.ShardingKey
-						value, id, keyFound, err := s.extractShardingKeyFromConditions(shardingKey, conditions, args, aliasMap, table)
-						log.Printf("For table %s: keyFound=%v, value=%v, id=%v, err=%v", table, keyFound, value, id, err)
+						value, id, keyFound, _ := s.extractShardingKeyFromConditions(shardingKey, conditions, args, aliasMap, table)
+						//log.Printf("For table %s: keyFound=%v, value=%v, id=%v, err=%v", table, keyFound, value, id, err)
 
 						// Log when suffix is determined
 						if keyFound || (id != 0) {
@@ -1570,7 +1570,6 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 				} else {
 					rightValue, _ = extractValueFromExpr(n.AExpr.Rexpr, args)
 				}
-
 				// Store known values with both qualified and unqualified names
 				if leftIsCol && !rightIsCol {
 					storeKnownKey(knownKeys, leftColName, rightValue)
@@ -1616,6 +1615,64 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 
 		}
 
+		if n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_LIKE ||
+			n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_ILIKE {
+			var leftColName, rightColName string
+			var leftValue, rightValue interface{}
+			var leftIsCol, rightIsCol bool
+
+			// Left expression
+			if colRef, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_ColumnRef); ok {
+				leftColName = extractColumnName(colRef.ColumnRef, aliasMap)
+				leftIsCol = true
+			} else {
+				leftValue, _ = extractValueFromExpr(n.AExpr.Lexpr, args)
+			}
+
+			// Right expression
+			if colRef, ok := n.AExpr.Rexpr.Node.(*pg_query.Node_ColumnRef); ok {
+				rightColName = extractColumnName(colRef.ColumnRef, aliasMap)
+				rightIsCol = true
+			} else {
+				rightValue, _ = extractValueFromExpr(n.AExpr.Rexpr, args)
+			}
+
+			// Extract clean terms from patterns
+			if !leftIsCol && rightIsCol {
+				// Pattern on left, column on right
+				if strPattern, ok := leftValue.(string); ok {
+					leftValue = extractKeyFromPattern(strPattern)
+				}
+			} else if leftIsCol && !rightIsCol {
+				// Column on left, pattern on right
+				if strPattern, ok := rightValue.(string); ok {
+					rightValue = extractKeyFromPattern(strPattern)
+				}
+			}
+
+			// Store values in known keys
+			if leftIsCol && !rightIsCol {
+				storeKnownKey(knownKeys, leftColName, rightValue)
+				// Direct check for sharding key
+				if getColumnNameWithoutTable(leftColName) == shardingKey {
+					return true, rightValue, nil
+				}
+			}
+			if rightIsCol && !leftIsCol {
+				storeKnownKey(knownKeys, rightColName, leftValue)
+
+				// Direct check for sharding key
+				if getColumnNameWithoutTable(rightColName) == shardingKey {
+					return true, leftValue, nil
+				}
+			}
+
+			// Check known keys as well
+			if val, exists := knownKeys[shardingKey]; exists {
+				return true, val, nil
+			}
+		}
+
 	case *pg_query.Node_BoolExpr:
 		//log.Printf("Processing BoolExpr of type '%s'", n.BoolExpr.Boolop)
 		for _, arg := range n.BoolExpr.Args {
@@ -1638,6 +1695,13 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 
 	}
 	return false, nil, nil
+}
+
+func extractKeyFromPattern(pattern string) string {
+	// Remove SQL wildcards (% and _) to get the core search term
+	pattern = strings.ReplaceAll(pattern, "%", "")
+	pattern = strings.ReplaceAll(pattern, "_", "")
+	return pattern
 }
 
 func storeKnownKey(knownKeys map[string]interface{}, colName string, value interface{}) {

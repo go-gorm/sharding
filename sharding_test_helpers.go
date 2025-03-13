@@ -90,8 +90,8 @@ func shardingHasher32Algorithm(columnValue any) (suffix string, err error) {
 	}
 	hashValue := hasher.Sum32()
 
-	// Assume we have 32 shards; adjust as needed.
-	suffix = fmt.Sprintf("_%d", hashValue%32)
+	// Assume we have 4 shards; adjust as needed.
+	suffix = fmt.Sprintf("_%d", hashValue%4)
 	return suffix, nil
 }
 
