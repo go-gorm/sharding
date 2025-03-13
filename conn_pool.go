@@ -4,16 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"log"
 	"strings"
-	"sync"
 	"time"
-
-	"gorm.io/gorm"
 )
-
-var inProgressQueries sync.Map
 
 // ConnPool Implement a ConnPool for replace db.Statement.ConnPool in Gorm
 type ConnPool struct {
@@ -34,15 +30,9 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	var (
 		curTime = time.Now()
 	)
-	queryKey := fmt.Sprintf("%p:%s", &query, query)
-	// Check if we're already processing this query
-	if _, loaded := inProgressQueries.LoadOrStore(queryKey, true); loaded {
-		// We're in a recursive call, just execute the original query
-		return pool.ConnPool.ExecContext(ctx, query, args...)
-	}
-
-	// Make sure we clean up when we're done
-	defer inProgressQueries.Delete(queryKey)
+	requestID := uuid.New().String()
+	log.Printf("[%s] ExecContext START: Query: %s", requestID, query)
+	defer log.Printf("[%s] ExecContext END", requestID)
 	// Get the query resolution without holding a lock
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
 	log.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",
@@ -92,15 +82,9 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 
 func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	var curTime = time.Now()
-	queryKey := fmt.Sprintf("%p:%s", &query, query)
-	// Check if we're already processing this query
-	if _, loaded := inProgressQueries.LoadOrStore(queryKey, true); loaded {
-		// We're in a recursive call, just execute the original query
-		return pool.ConnPool.QueryContext(ctx, query, args...)
-	}
-
-	// Make sure we clean up when we're done
-	defer inProgressQueries.Delete(queryKey)
+	requestID := uuid.New().String()
+	log.Printf("[%s] QueryContext START: Query: %s", requestID, query)
+	defer log.Printf("[%s] QueryContext END", requestID)
 	// Get the query resolution without locking
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
 	log.Printf("QueryContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",
@@ -164,15 +148,9 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 }
 
 func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	queryKey := fmt.Sprintf("%p:%s", &query, query)
-	// Check if we're already processing this query
-	if _, loaded := inProgressQueries.LoadOrStore(queryKey, true); loaded {
-		// We're in a recursive call, just execute the original query
-		return pool.ConnPool.QueryRowContext(ctx, query, args...)
-	}
-
-	// Make sure we clean up when we're done
-	defer inProgressQueries.Delete(queryKey)
+	requestID := uuid.New().String()
+	log.Printf("[%s] QueryRowContext START: Query: %s", requestID, query)
+	defer log.Printf("[%s] QueryRowContext END", requestID)
 	// Get the query resolution without holding a lock
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
 	log.Printf("QueryRowContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",
