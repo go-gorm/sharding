@@ -63,7 +63,13 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 
 	// Execute the main table query FIRST if DoubleWrite is enabled
 	if table != "" {
-		if r, ok := pool.sharding.configs[table]; ok && r.DoubleWrite {
+		pool.sharding.mutex.RLock()
+		doubleWrite := true
+		if r, ok := pool.sharding.configs[table]; ok {
+			doubleWrite = r.DoubleWrite
+		}
+		pool.sharding.mutex.RUnlock()
+		if doubleWrite {
 			// Key change here - execute on the main table with the original query
 			pool.ConnPool.ExecContext(ctx, ftQuery, args...)
 		}
@@ -124,7 +130,14 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 
 	isInsert := strings.Contains(strings.ToUpper(query), "INSERT INTO")
 	if isInsert && table != "" {
-		if r, ok := pool.sharding.configs[table]; ok && r.DoubleWrite {
+
+		pool.sharding.mutex.RLock()
+		doubleWrite := true
+		if r, ok := pool.sharding.configs[table]; ok {
+			doubleWrite = r.DoubleWrite
+		}
+		pool.sharding.mutex.RUnlock()
+		if doubleWrite {
 			// Execute the INSERT on the main table first
 			// For inserts that use QueryContext (with RETURNING clause), we need to
 			// execute on the main table with QueryContext
@@ -177,7 +190,13 @@ func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...
 
 	// Handle double-write for INSERT operations
 	if isInsert && table != "" && err == nil {
-		if r, ok := pool.sharding.configs[table]; ok && r.DoubleWrite {
+		pool.sharding.mutex.RLock()
+		doubleWrite := true
+		if r, ok := pool.sharding.configs[table]; ok {
+			doubleWrite = r.DoubleWrite
+		}
+		pool.sharding.mutex.RUnlock()
+		if doubleWrite {
 			// Execute the INSERT on the main table first
 			pool.ConnPool.QueryRowContext(ctx, query, args...)
 			// We don't check for errors because QueryRowContext can't return them
