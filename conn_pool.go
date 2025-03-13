@@ -30,6 +30,12 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	var (
 		curTime = time.Now()
 	)
+
+	// Skip sharding if already in progress (prevents recursion)
+	if ctx.Value("sharding_recursive") != nil {
+		return pool.ConnPool.ExecContext(ctx, query, args...)
+	}
+	ctx = context.WithValue(ctx, "sharding_recursive", true)
 	// Get the query resolution without holding a lock
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
 	log.Printf("ExecContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",
@@ -79,6 +85,12 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 
 func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	var curTime = time.Now()
+
+	// Skip sharding if already in progress (prevents recursion)
+	if ctx.Value("sharding_recursive") != nil {
+		return pool.ConnPool.QueryContext(ctx, query, args...)
+	}
+	ctx = context.WithValue(ctx, "sharding_recursive", true)
 
 	// Get the query resolution without locking
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
@@ -143,6 +155,11 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 }
 
 func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	// Skip sharding if already in progress (prevents recursion)
+	if ctx.Value("sharding_recursive") != nil {
+		return pool.ConnPool.QueryRowContext(ctx, query, args...)
+	}
+	ctx = context.WithValue(ctx, "sharding_recursive", true)
 	// Get the query resolution without holding a lock
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
 	log.Printf("QueryRowContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",

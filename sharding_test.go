@@ -3172,7 +3172,7 @@ func TestILikeWithConcatenationSharding(t *testing.T) {
 	}
 
 	// Clean up tables before test
-	//truncateTables(testDB, "contracts", "contracts_0", "contracts_1", "contracts_2")
+	truncateTables(testDB, "contracts", "contracts_0", "contracts_1", "contracts_2")
 
 	// Create a hash sharding config that works with name field
 	contractsShardingConfig := Config{
