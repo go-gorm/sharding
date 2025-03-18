@@ -3236,8 +3236,8 @@ func TestILikeWithConcatenationSharding(t *testing.T) {
 		var results []Contract
 
 		// Use the nosharding hint
-		err := testDB.Clauses(hints.Comment("select", "nosharding")).
-			Raw("SELECT * FROM contracts WHERE contracts.name ILIKE '%' || ? || '%' LIMIT 10", "TEST-WBTC").
+		err := testDB.
+			Raw("SELECT * FROM contracts WHERE contracts.name ILIKE '%' || ? || '%' LIMIT 10", "TEST-USDC").
 			Scan(&results).Error
 
 		// This should succeed with nosharding

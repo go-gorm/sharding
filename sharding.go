@@ -3,9 +3,6 @@ package sharding
 import (
 	"errors"
 	"fmt"
-	"github.com/bwmarrin/snowflake"
-	pg_query "github.com/pganalyze/pg_query_go/v5"
-	"gorm.io/gorm"
 	"hash/crc32"
 	"log"
 	"math"
@@ -15,6 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/bwmarrin/snowflake"
+	pg_query "github.com/pganalyze/pg_query_go/v5"
+	"gorm.io/gorm"
 )
 
 // PartitionType defines the type of partitioning strategy
@@ -1829,19 +1830,37 @@ func collectAliasesFromNode(node *pg_query.Node, aliasMap map[string]string) {
 func extractSearchTermFromConcatenation(aExpr *pg_query.A_Expr, args []interface{}) (string, error) {
 	// Handle simple cases like: '%' || $1 || '%'
 	if len(aExpr.Name) > 0 && aExpr.Name[0].Node.(*pg_query.Node_String_).String_.Sval == "||" {
-		// Try to extract the parameter in the middle
-		if _, ok := aExpr.Rexpr.Node.(*pg_query.Node_AExpr); ok {
-			// This is the second || operator in '%' || $1 || '%'
-			lValue, err := extractValueFromExpr(aExpr.Lexpr, args)
-			if err == nil && lValue != nil {
-				// Found the middle parameter, it's the Lexpr of the second || operator
-				return fmt.Sprintf("%v", lValue), nil
+		// First, check if the left side is a parameter
+		lValue, lErr := extractValueFromExpr(aExpr.Lexpr, args)
+		if lErr == nil && lValue != nil && lValue != "%" && lValue != "_" {
+			// Found a non-wildcard parameter on the left side
+			return fmt.Sprintf("%v", lValue), nil
+		}
+
+		// Next, check if the right side is a parameter
+		rValue, rErr := extractValueFromExpr(aExpr.Rexpr, args)
+		if rErr == nil && rValue != nil && rValue != "%" && rValue != "_" {
+			// Found a non-wildcard parameter on the right side
+			return fmt.Sprintf("%v", rValue), nil
+		}
+
+		// If right side is another concatenation, recursively check it
+		if rExpr, ok := aExpr.Rexpr.Node.(*pg_query.Node_AExpr); ok {
+			if len(rExpr.AExpr.Name) > 0 && rExpr.AExpr.Name[0].Node.(*pg_query.Node_String_).String_.Sval == "||" {
+				// Recursively check the right expression
+				if searchTerm, err := extractSearchTermFromConcatenation(rExpr.AExpr, args); err == nil {
+					return searchTerm, nil
+				}
 			}
-		} else {
-			// This might be a direct parameter
-			rValue, err := extractValueFromExpr(aExpr.Rexpr, args)
-			if err == nil && rValue != nil {
-				return fmt.Sprintf("%v", rValue), nil
+		}
+
+		// If left side is another concatenation, recursively check it
+		if lExpr, ok := aExpr.Lexpr.Node.(*pg_query.Node_AExpr); ok {
+			if len(lExpr.AExpr.Name) > 0 && lExpr.AExpr.Name[0].Node.(*pg_query.Node_String_).String_.Sval == "||" {
+				// Recursively check the left expression
+				if searchTerm, err := extractSearchTermFromConcatenation(lExpr.AExpr, args); err == nil {
+					return searchTerm, nil
+				}
 			}
 		}
 	}
@@ -1875,6 +1894,9 @@ func extractAllValuesFromConcatenation(aExpr *pg_query.A_Expr, args []interface{
 			if strVal != "%" && strVal != "_" {
 				parts = append(parts, strVal)
 			}
+		} else {
+			// If it's not a string, convert it to string and add it
+			parts = append(parts, fmt.Sprintf("%v", leftVal))
 		}
 	} else if leftExpr, ok := aExpr.Lexpr.Node.(*pg_query.Node_AExpr); ok {
 		// Recursive concatenation on left side
@@ -1888,6 +1910,9 @@ func extractAllValuesFromConcatenation(aExpr *pg_query.A_Expr, args []interface{
 			if strVal != "%" && strVal != "_" {
 				parts = append(parts, strVal)
 			}
+		} else {
+			// If it's not a string, convert it to string and add it
+			parts = append(parts, fmt.Sprintf("%v", rightVal))
 		}
 	} else if rightExpr, ok := aExpr.Rexpr.Node.(*pg_query.Node_AExpr); ok {
 		// Recursive concatenation on right side
