@@ -2887,7 +2887,7 @@ func TestShardingAlgorithm(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			suffix, err := shardingHasher32Algorithm(tt.input)
+			suffix, err := shardingHasher4Algorithm(tt.input)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -3035,7 +3035,7 @@ func TestILikeQueryWithHashSharding(t *testing.T) {
 		PartitionType:  PartitionTypeHash,
 		NumberOfShards: 4,
 		// Use a proper hash algorithm for integer IDs
-		ShardingAlgorithm: shardingHasher32Algorithm,
+		ShardingAlgorithm: shardingHasher4Algorithm,
 		ShardingAlgorithmByPrimaryKey: func(id int64) string {
 			return fmt.Sprintf("_%d", id%4)
 		},
@@ -3181,7 +3181,7 @@ func TestILikeWithConcatenationSharding(t *testing.T) {
 		PartitionType:  PartitionTypeHash,
 		NumberOfShards: 4,
 		// Use a hash algorithm that ensures it's within range
-		ShardingAlgorithm: shardingHasher32Algorithm,
+		ShardingAlgorithm: shardingHasher4Algorithm,
 		ShardingAlgorithmByPrimaryKey: func(id int64) string {
 			return fmt.Sprintf("_%d", id%4)
 		},

@@ -71,7 +71,7 @@ func mariadbDialector() bool {
 	return os.Getenv("DIALECTOR") == "mariadb"
 }
 
-func shardingHasher32Algorithm(columnValue any) (suffix string, err error) {
+func shardingHasher4Algorithm(columnValue any) (suffix string, err error) {
 	str, ok := columnValue.(string)
 	if !ok {
 		return "", fmt.Errorf("expected string, got %T", columnValue)
@@ -92,6 +92,30 @@ func shardingHasher32Algorithm(columnValue any) (suffix string, err error) {
 
 	// Assume we have 4 shards; adjust as needed.
 	suffix = fmt.Sprintf("_%d", hashValue%4)
+	return suffix, nil
+}
+
+func shardingHasher32Algorithm(columnValue any) (suffix string, err error) {
+	str, ok := columnValue.(string)
+	if !ok {
+		return "", fmt.Errorf("expected string, got %T", columnValue)
+	}
+
+	// Use a default value if name is empty
+	if str == "" {
+		str = "default"
+	}
+
+	// Create a new FNV-1a 32-bit hash.
+	hasher := fnv.New32a()
+	_, err = hasher.Write([]byte(str))
+	if err != nil {
+		return "", fmt.Errorf("failed to write to hasher: %v", err)
+	}
+	hashValue := hasher.Sum32()
+
+	// Assume we have 4 shards; adjust as needed.
+	suffix = fmt.Sprintf("_%d", hashValue%32)
 	return suffix, nil
 }
 
