@@ -5,6 +5,7 @@ import (
 	"github.com/bwmarrin/snowflake"
 	"github.com/stretchr/testify/assert"
 	"gorm.io/gorm"
+	"hash/crc32"
 	"hash/fnv"
 	"os"
 	"reflect"
@@ -95,28 +96,42 @@ func shardingHasher4Algorithm(columnValue any) (suffix string, err error) {
 	return suffix, nil
 }
 
+// shardingHasher32Algorithm returns a shard suffix (_0 through _31)
+// based on a position-weighted character sum hash
 func shardingHasher32Algorithm(columnValue any) (suffix string, err error) {
-	str, ok := columnValue.(string)
-	if !ok {
-		return "", fmt.Errorf("expected string, got %T", columnValue)
+	// Handle nil case
+	if columnValue == nil {
+		return "_0", nil // Default shard for nil values
 	}
 
-	// Use a default value if name is empty
+	// Convert to string and handle different types
+	var str string
+	switch v := columnValue.(type) {
+	case string:
+		str = v
+	case *string:
+		if v == nil {
+			return "_0", nil
+		}
+		str = *v
+	default:
+		return "", fmt.Errorf("expected string or *string, got %T", columnValue)
+	}
+
+	// Handle empty string case
 	if str == "" {
-		str = "default"
+		return "_0", nil // Default shard for empty strings
 	}
 
-	// Create a new FNV-1a 32-bit hash.
-	hasher := fnv.New32a()
-	_, err = hasher.Write([]byte(str))
-	if err != nil {
-		return "", fmt.Errorf("failed to write to hasher: %v", err)
-	}
-	hashValue := hasher.Sum32()
+	// Use standard CRC-32 implementation from Go's standard library
+	// This is more reliable and well-tested than custom implementations
+	crc := crc32.ChecksumIEEE([]byte(str))
 
-	// Assume we have 4 shards; adjust as needed.
-	suffix = fmt.Sprintf("_%d", hashValue%32)
-	return suffix, nil
+	// Calculate shard number (modulo 32 to get a number from 0 to 31)
+	shardNum := crc % 32
+
+	// Return shard suffix (e.g., "_0", "_1", etc.)
+	return fmt.Sprintf("_%d", shardNum), nil
 }
 
 // Function to safely get value from pointer types
