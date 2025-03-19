@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func dbURLFvn() string {
+func dbURLCvc() string {
 	dbURL := os.Getenv("DB_URL")
 	if len(dbURL) == 0 {
 		dbURL = "postgres://postgres:@localhost:6432/sharding-fvn-test?sslmode=disable"
@@ -22,25 +22,8 @@ func dbURLFvn() string {
 	return dbURL
 }
 
-// fnvShardingAlgorithm is a sharding algorithm that uses FNV-1a hash
-func fnvShardingAlgorithm(value interface{}, numShards uint) (string, error) {
-	var strValue string
-
-	// Convert value to string
-	switch v := value.(type) {
-	case string:
-		strValue = v
-	case []byte:
-		strValue = string(v)
-	default:
-		strValue = fmt.Sprintf("%v", v)
-	}
-	suffix, _ := shardingHasher32Algorithm(strValue)
-	return suffix, nil
-}
-
-// TestFNVHashSharding tests the FNV hash sharding algorithm
-func TestFNVHashSharding(t *testing.T) {
+// TestCVCHashSharding tests the FNV hash sharding algorithm
+func TestCVCHashSharding(t *testing.T) {
 	// Test cases with expected shard for 32 shards
 	testCases := []struct {
 		input       string
@@ -61,7 +44,7 @@ func TestFNVHashSharding(t *testing.T) {
 	for i, tc := range testCases {
 		t.Run(fmt.Sprintf("Case%d", i), func(t *testing.T) {
 			// Get shard suffix
-			suffix, err := fnvShardingAlgorithm(tc.input, tc.numShards)
+			suffix, err := shardingHasher32Algorithm(tc.input)
 			assert.NoError(t, err)
 
 			// Extract shard number from suffix
@@ -79,14 +62,14 @@ func TestFNVHashSharding(t *testing.T) {
 			}
 
 			// Run the test again to verify consistency
-			suffix2, _ := fnvShardingAlgorithm(tc.input, tc.numShards)
+			suffix2, _ := shardingHasher32Algorithm(tc.input)
 			assert.Equal(t, suffix, suffix2, "Hash algorithm should be deterministic")
 
 			// Test case sensitivity normalization
 			if len(tc.input) > 0 {
 
 				// Hash should be the same regardless of case
-				suffixUpper, _ := fnvShardingAlgorithm(tc.input, tc.numShards)
+				suffixUpper, _ := shardingHasher32Algorithm(tc.input)
 				assert.Equal(t, suffix, suffixUpper, "Hash should be case-insensitive")
 			}
 		})
@@ -112,9 +95,9 @@ func TestFNVHashConsistency(t *testing.T) {
 		for _, numShards := range shardCounts {
 			// Calculate shard for this number of shards
 			//shardNum := hash % uint64(numShards)
-
+			fmt.Println("numShards: ", numShards)
 			// Calculate using the sharding algorithm
-			suffix, err := fnvShardingAlgorithm(address, numShards)
+			suffix, err := shardingHasher32Algorithm(address)
 			assert.NoError(t, err)
 
 			// Extract shard number from suffix
@@ -147,7 +130,7 @@ func TestFNVHashDistribution(t *testing.T) {
 		address := fmt.Sprintf("0x%032x", i)
 
 		// Get shard suffix
-		suffix, err := fnvShardingAlgorithm(address, numShards)
+		suffix, err := shardingHasher32Algorithm(address)
 		assert.NoError(t, err)
 
 		// Extract shard number from suffix
@@ -181,11 +164,11 @@ func TestHashCompareWithSQL(t *testing.T) {
 	// This test would ideally connect to a database and compare results
 	// between the Go implementation and the SQL implementation
 
-	dbFvnConfig := postgres.Config{
-		DSN:                  dbURLFvn(),
+	dbCvcConfig := postgres.Config{
+		DSN:                  dbURLCvc(),
 		PreferSimpleProtocol: true,
 	}
-	dbFnv, err := gorm.Open(postgres.New(dbFvnConfig), &gorm.Config{
+	dbFnv, err := gorm.Open(postgres.New(dbCvcConfig), &gorm.Config{
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	assert.NoError(t, err)
@@ -194,8 +177,8 @@ func TestHashCompareWithSQL(t *testing.T) {
 	address1 := "0x123456789abcdef0123456789abcdef0123456"
 	address2 := "0xabcdef0123456789abcdef0123456789abcdef"
 
-	suffix1, _ := fnvShardingAlgorithm(address1, 32)
-	suffix2, _ := fnvShardingAlgorithm(address2, 32)
+	suffix1, _ := shardingHasher32Algorithm(address1)
+	suffix2, _ := shardingHasher32Algorithm(address2)
 
 	var shard1, shard2 int
 	fmt.Sscanf(suffix1, "_%d", &shard1)
@@ -204,10 +187,14 @@ func TestHashCompareWithSQL(t *testing.T) {
 	// Create a SQL function that implements the FNV-1a hash algorithm
 	// This implementation matches the Go implementation in shardingHasher32Algorithm
 	dbFnv.Raw(`
--- Drop the function if it already exists
-DROP FUNCTION IF EXISTS crc32;
+-- Drop all existing functions to create clean state
+DROP FUNCTION IF EXISTS calculate_shard(anyelement);
+DROP FUNCTION IF EXISTS crc32(text);
+DROP FUNCTION IF EXISTS crc32(numeric);
+DROP FUNCTION IF EXISTS crc32(bigint);
 
-CREATE OR REPLACE FUNCTION crc32(text_string text) RETURNS bigint AS $$
+-- Main CRC32 function for text input
+CREATE OR REPLACE FUNCTION crc32(text_string text) RETURNS integer AS $$
 DECLARE
     tmp bigint;
     i int;
@@ -215,6 +202,13 @@ DECLARE
     byte_length int;
     binary_string bytea;
 BEGIN
+    -- Handle NULL inputs explicitly
+    IF text_string IS NULL THEN
+        -- Return a fixed value for NULL that matches the Go implementation
+        RETURN 0;
+    END IF;
+
+    -- Handle empty string
     IF text_string = '' THEN
         RETURN 0;
     END IF;
@@ -222,7 +216,15 @@ BEGIN
     i = 0;
     tmp = 4294967295;
     byte_length = bit_length(text_string) / 8;
-    binary_string = decode(replace(text_string, E'\\\\', E'\\\\\\\\'), 'escape');
+
+    -- Be more defensive with binary string conversion
+    BEGIN
+        binary_string = decode(replace(text_string, E'\\\\', E'\\\\\\\\'), 'escape');
+    EXCEPTION WHEN OTHERS THEN
+        -- If binary conversion fails, use a different approach
+        binary_string = convert_to(text_string, 'UTF8');
+    END;
+    
     LOOP
         tmp = (tmp # get_byte(binary_string, i))::bigint;
         i = i + 1;
@@ -243,7 +245,64 @@ BEGIN
     tmp = tmp # 4294967295;
     
     -- Apply modulo 32 explicitly
-    RETURN tmp % 32;
+    RETURN (tmp % 32)::integer;
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+-- Create specific type handlers instead of polymorphic functions
+-- Numeric version - convert to text and call the text version
+CREATE OR REPLACE FUNCTION crc32(numeric_value numeric) RETURNS integer AS $$
+BEGIN
+    RETURN crc32(numeric_value::text);
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+-- Integer version
+CREATE OR REPLACE FUNCTION crc32(integer_value integer) RETURNS integer AS $$
+BEGIN
+    RETURN crc32(integer_value::text);
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+-- Bigint version
+CREATE OR REPLACE FUNCTION crc32(bigint_value bigint) RETURNS integer AS $$
+BEGIN
+    RETURN crc32(bigint_value::text);
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+-- Boolean version
+CREATE OR REPLACE FUNCTION crc32(bool_value boolean) RETURNS integer AS $$
+BEGIN
+    RETURN crc32(bool_value::text);
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+-- Use text version for any type - specific types are much better than anyelement
+CREATE OR REPLACE FUNCTION calculate_shard(value text) RETURNS integer AS $$
+BEGIN
+    RETURN crc32(value);
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+-- Integer version
+CREATE OR REPLACE FUNCTION calculate_shard(value integer) RETURNS integer AS $$
+BEGIN
+    RETURN crc32(value::text);
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+-- Bigint version
+CREATE OR REPLACE FUNCTION calculate_shard(value bigint) RETURNS integer AS $$
+BEGIN
+    RETURN crc32(value::text);
+END
+$$ IMMUTABLE LANGUAGE plpgsql;
+
+-- Numeric version
+CREATE OR REPLACE FUNCTION calculate_shard(value numeric) RETURNS integer AS $$
+BEGIN
+    RETURN crc32(value::text);
 END
 $$ IMMUTABLE LANGUAGE plpgsql;
 `).Scan(nil)
@@ -256,11 +315,13 @@ $$ IMMUTABLE LANGUAGE plpgsql;
 		"0xffffffffffffffffffffffffffffffffffffffff",
 		"",
 		nil,
+		"325053223",
+		54342432,
 	}
 
 	// Print the actual shard numbers for debugging
 	for _, address := range addresses {
-		goSuffix, _ := fnvShardingAlgorithm(address, 32)
+		goSuffix, _ := shardingHasher32Algorithm(address)
 		var goShardNum int
 		fmt.Sscanf(goSuffix, "_%d", &goShardNum)
 		t.Logf("Address %s hashes to shard %d", address, goShardNum)
@@ -268,7 +329,7 @@ $$ IMMUTABLE LANGUAGE plpgsql;
 
 	for _, address := range addresses {
 		// Calculate using Go implementation
-		goSuffix, err := fnvShardingAlgorithm(address, 32)
+		goSuffix, err := shardingHasher32Algorithm(address)
 		assert.NoError(t, err)
 
 		var goShardNum int
@@ -277,7 +338,7 @@ $$ IMMUTABLE LANGUAGE plpgsql;
 
 		// Calculate using SQL implementation
 		var sqlShardNum int
-		err = dbFnv.Raw("SELECT crc32(?)", address).Scan(&sqlShardNum).Error
+		err = dbFnv.Raw("SELECT calculate_shard(?)", address).Scan(&sqlShardNum).Error
 		assert.NoError(t, err)
 
 		// For this test, we're using a hardcoded SQL implementation that returns the same values

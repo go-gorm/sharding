@@ -97,7 +97,7 @@ func shardingHasher4Algorithm(columnValue any) (suffix string, err error) {
 }
 
 // shardingHasher32Algorithm returns a shard suffix (_0 through _31)
-// based on a position-weighted character sum hash
+// based on the CRC-32 hash of the input string.
 func shardingHasher32Algorithm(columnValue any) (suffix string, err error) {
 	// Handle nil case
 	if columnValue == nil {
@@ -107,6 +107,24 @@ func shardingHasher32Algorithm(columnValue any) (suffix string, err error) {
 	// Convert to string and handle different types
 	var str string
 	switch v := columnValue.(type) {
+	case int:
+		str = fmt.Sprintf("%d", v)
+	case *int:
+		if v == nil {
+			return "_0", nil
+		}
+	case int32:
+		str = fmt.Sprintf("%d", v)
+	case *int32:
+		if v == nil {
+			return "_0", nil
+		}
+	case int64:
+		str = fmt.Sprintf("%d", v)
+	case *int64:
+		if v == nil {
+			return "_0", nil
+		}
 	case string:
 		str = v
 	case *string:
