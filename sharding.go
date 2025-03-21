@@ -504,11 +504,25 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 						hasShardingKey = true
 						break
 					}
+				} else {
+					return query, query, tableName, nil
 				}
 			}
 
 			// If no sharding key found
 			if !hasShardingKey {
+				// Check if we're using LOWER function on a column that might be a sharding key
+				for _, condition := range conditions {
+					if containsLowerFunction(condition) {
+						// If we're using LOWER, we'll allow the query to proceed with double write
+						// This is a special case for queries like "WHERE LOWER(name) = LOWER('value')"
+						if tableName == "" && len(tables) > 0 {
+							tableName = tables[0]
+						}
+						return ftQuery, stQuery, tableName, nil
+					}
+				}
+
 				if tableName == "" && len(tables) > 0 {
 					tableName = tables[0]
 				}
@@ -1547,6 +1561,7 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 	if node == nil {
 		return false, nil, nil
 	}
+
 	switch n := node.Node.(type) {
 	case *pg_query.Node_AExpr:
 		if n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_OP && len(n.AExpr.Name) > 0 {
@@ -1556,21 +1571,64 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 				var leftValue, rightValue interface{}
 				var leftIsCol, rightIsCol bool
 
-				// Left expression
+				// Left expression - check for LOWER function
 				if colRef, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_ColumnRef); ok {
 					leftColName = extractColumnName(colRef.ColumnRef, aliasMap)
 					leftIsCol = true
+				} else if funcCall, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_FuncCall); ok {
+					// Handle LOWER function on left side
+					if len(funcCall.FuncCall.Funcname) > 0 {
+						funcName := funcCall.FuncCall.Funcname[0].Node.(*pg_query.Node_String_).String_.Sval
+						if strings.EqualFold(funcName, "lower") && len(funcCall.FuncCall.Args) > 0 {
+							// Extract the column from LOWER(column)
+							if argColRef, ok := funcCall.FuncCall.Args[0].Node.(*pg_query.Node_ColumnRef); ok {
+								leftColName = extractColumnName(argColRef.ColumnRef, aliasMap)
+								leftIsCol = true
+								log.Printf("Detected LOWER function on column: %s", leftColName)
+
+								// Check if this is the sharding key directly
+								if getColumnNameWithoutTable(leftColName) == shardingKey {
+									// If the right side is a value, we can return it directly
+									if rightVal, err := extractValueFromExpr(n.AExpr.Rexpr, args); err == nil && rightVal != nil {
+										return true, rightVal, nil
+									}
+								}
+							}
+						}
+					}
 				} else {
 					leftValue, _ = extractValueFromExpr(n.AExpr.Lexpr, args)
 				}
 
-				// Right expression
+				// Right expression - check for LOWER function
 				if colRef, ok := n.AExpr.Rexpr.Node.(*pg_query.Node_ColumnRef); ok {
 					rightColName = extractColumnName(colRef.ColumnRef, aliasMap)
 					rightIsCol = true
+				} else if funcCall, ok := n.AExpr.Rexpr.Node.(*pg_query.Node_FuncCall); ok {
+					// Handle LOWER function on right side
+					if len(funcCall.FuncCall.Funcname) > 0 {
+						funcName := funcCall.FuncCall.Funcname[0].Node.(*pg_query.Node_String_).String_.Sval
+						if strings.EqualFold(funcName, "lower") && len(funcCall.FuncCall.Args) > 0 {
+							// Extract the column from LOWER(column)
+							if argColRef, ok := funcCall.FuncCall.Args[0].Node.(*pg_query.Node_ColumnRef); ok {
+								rightColName = extractColumnName(argColRef.ColumnRef, aliasMap)
+								rightIsCol = true
+								log.Printf("Detected LOWER function on column: %s", rightColName)
+
+								// Check if this is the sharding key directly
+								if getColumnNameWithoutTable(rightColName) == shardingKey {
+									// If the left side is a value, we can return it directly
+									if leftVal, err := extractValueFromExpr(n.AExpr.Lexpr, args); err == nil && leftVal != nil {
+										return true, leftVal, nil
+									}
+								}
+							}
+						}
+					}
 				} else {
 					rightValue, _ = extractValueFromExpr(n.AExpr.Rexpr, args)
 				}
+
 				// Store known values with both qualified and unqualified names
 				if leftIsCol && !rightIsCol {
 					storeKnownKey(knownKeys, leftColName, rightValue)
@@ -1588,9 +1646,6 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 				if val, exists := knownKeys[shardingKey]; exists {
 					return true, val, nil
 				}
-				//log.Printf("Processing AExpr: Operator '%s'", opName)
-				//log.Printf("Left Column: '%s', Right Column: '%s'", leftColName, rightColName)
-				//log.Printf("Known Keys: %v", knownKeys)
 			} else {
 				// Check if operation involves sharding key but with non-equality operator
 				var leftColName, rightColName string
@@ -1602,6 +1657,16 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 					if getColumnNameWithoutTable(leftColName) == shardingKey {
 						return false, nil, ErrMissingShardingKey
 					}
+				} else if funcCall, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_FuncCall); ok {
+					// Check if the function contains the sharding key
+					if len(funcCall.FuncCall.Args) > 0 {
+						if argColRef, ok := funcCall.FuncCall.Args[0].Node.(*pg_query.Node_ColumnRef); ok {
+							colName := extractColumnName(argColRef.ColumnRef, aliasMap)
+							if getColumnNameWithoutTable(colName) == shardingKey {
+								return false, nil, ErrMissingShardingKey
+							}
+						}
+					}
 				}
 
 				// Right expression
@@ -1611,14 +1676,23 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 					if getColumnNameWithoutTable(rightColName) == shardingKey {
 						return false, nil, ErrMissingShardingKey
 					}
+				} else if funcCall, ok := n.AExpr.Rexpr.Node.(*pg_query.Node_FuncCall); ok {
+					// Check if the function contains the sharding key
+					if len(funcCall.FuncCall.Args) > 0 {
+						if argColRef, ok := funcCall.FuncCall.Args[0].Node.(*pg_query.Node_ColumnRef); ok {
+							colName := extractColumnName(argColRef.ColumnRef, aliasMap)
+							if getColumnNameWithoutTable(colName) == shardingKey {
+								return false, nil, ErrMissingShardingKey
+							}
+						}
+					}
 				}
 			}
-
 		}
 
+		// Handle LIKE and ILIKE operations
 		if n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_LIKE ||
 			n.AExpr.Kind == pg_query.A_Expr_Kind_AEXPR_ILIKE {
-
 			// Left side of the ILIKE operation
 			if colRef, ok := n.AExpr.Lexpr.Node.(*pg_query.Node_ColumnRef); ok {
 				colName := extractColumnName(colRef.ColumnRef, aliasMap)
@@ -1658,13 +1732,13 @@ func traverseConditionForKey(shardingKey string, node *pg_query.Node, args []int
 		}
 
 	case *pg_query.Node_BoolExpr:
-		//log.Printf("Processing BoolExpr of type '%s'", n.BoolExpr.Boolop)
 		for _, arg := range n.BoolExpr.Args {
 			keyFound, value, err = traverseConditionForKey(shardingKey, arg, args, knownKeys, aliasMap)
 			if keyFound || err != nil {
 				return keyFound, value, err
 			}
 		}
+
 	case *pg_query.Node_SubLink:
 		// Handle subqueries in conditions
 		if subselect, ok := n.SubLink.Subselect.Node.(*pg_query.Node_SelectStmt); ok {
@@ -2188,6 +2262,59 @@ func extractTableNameWithRegex(query string) (string, error) {
 	}
 
 	return "", fmt.Errorf("could not extract table name from query")
+}
+
+// Helper function to check if a condition contains a LOWER function
+func containsLowerFunction(node *pg_query.Node) bool {
+	if node == nil {
+		return false
+	}
+
+	switch n := node.Node.(type) {
+	case *pg_query.Node_AExpr:
+		// Check both sides of the expression
+		if containsLowerFunctionInExpr(n.AExpr.Lexpr) || containsLowerFunctionInExpr(n.AExpr.Rexpr) {
+			return true
+		}
+	case *pg_query.Node_BoolExpr:
+		// Check all arguments of the boolean expression
+		for _, arg := range n.BoolExpr.Args {
+			if containsLowerFunction(arg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Helper function to check if an expression contains a LOWER function
+func containsLowerFunctionInExpr(expr *pg_query.Node) bool {
+	if expr == nil {
+		return false
+	}
+
+	switch n := expr.Node.(type) {
+	case *pg_query.Node_FuncCall:
+		// Check if this is a LOWER function
+		if len(n.FuncCall.Funcname) > 0 {
+			if stringNode, ok := n.FuncCall.Funcname[0].Node.(*pg_query.Node_String_); ok {
+				if strings.EqualFold(stringNode.String_.Sval, "lower") {
+					return true
+				}
+			}
+		}
+	case *pg_query.Node_AExpr:
+		// Recursively check both sides of the expression
+		return containsLowerFunctionInExpr(n.AExpr.Lexpr) || containsLowerFunctionInExpr(n.AExpr.Rexpr)
+	case *pg_query.Node_BoolExpr:
+		// Recursively check all arguments
+		for _, arg := range n.BoolExpr.Args {
+			if containsLowerFunctionInExpr(arg) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // cleanTableName removes schema prefixes, quotes, and other decorations from table names
