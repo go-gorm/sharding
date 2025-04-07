@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -28,25 +27,19 @@ var (
 )
 
 func debugLog(format string, args ...interface{}) {
-	if DefaultLogLevel >= LogLevelDebug {
-		log.Printf(format, args...)
-	}
+	GetLogger().Debug(format, args...)
 }
 
 func traceLog(format string, args ...interface{}) {
-	if DefaultLogLevel >= LogLevelTrace {
-		log.Printf(format, args...)
-	}
+	GetLogger().Trace(format, args...)
 }
 
 func infoLog(format string, args ...interface{}) {
-	if DefaultLogLevel >= LogLevelInfo {
-		log.Printf(format, args...)
-	}
+	GetLogger().Info(format, args...)
 }
 
 func errorLog(format string, args ...interface{}) {
-	log.Printf(format, args...)
+	GetLogger().Error(format, args...)
 }
 
 // ConnPool wraps standard GORM ConnPool to handle sharding transparently for client code
@@ -339,12 +332,24 @@ func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...
 
 // BeginTx uses composition to provide consistent client interface regardless of backend capabilities
 func (pool *ConnPool) BeginTx(ctx context.Context, opt *sql.TxOptions) (gorm.ConnPool, error) {
-	// Quick context check prevents unnecessary transaction setup work
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if db, ok := pool.ConnPool.(interface {
+		Get(string) (interface{}, bool)
+	}); ok {
+		if val, ok := db.Get("supports_transactions"); ok && val.(bool) {
+			if basePool, ok := pool.ConnPool.(gorm.ConnPoolBeginner); ok {
+				txConn, err := basePool.BeginTx(ctx, opt)
+				if err != nil {
+					return nil, fmt.Errorf("forced transaction failed: %w", err)
+				}
+				return &ConnPool{
+					sharding: pool.sharding,
+					ConnPool: txConn,
+				}, nil
+			}
+		}
 	}
 
-	// Type assertions allow supporting various pool implementations without requiring all methods
+	// Try standard transaction support
 	if basePool, ok := pool.ConnPool.(gorm.ConnPoolBeginner); ok {
 		txConn, err := basePool.BeginTx(ctx, opt)
 		if err != nil {
