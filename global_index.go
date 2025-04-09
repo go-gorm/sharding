@@ -4,13 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"gorm.io/gorm"
 	"log"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"gorm.io/gorm"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
