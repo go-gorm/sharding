@@ -650,8 +650,13 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 					// If more than one unique suffix is found, return an error
 					if len(suffixes) > 1 {
-						// Even with DoubleWrite, we can't insert into different shards in one query
-						return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
+						// Don't error immediately, let the batch handler deal with it
+						// Set tableName so the caller knows this needs batch processing
+						// rather than returning ErrInsertDiffSuffix
+						tableName = originalTableName
+
+						// Return the original query to let batch handler process it
+						return query, query, tableName, nil
 					}
 
 					// Capture the consistent suffix
@@ -679,8 +684,13 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 
 					// If more than one unique suffix is found, return an error
 					if len(suffixes) > 1 {
-						// Even with DoubleWrite, we can't insert into different shards in one query
-						return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
+						// Don't error immediately, let the batch handler deal with it
+						// Set tableName so the caller knows this needs batch processing
+						// rather than returning ErrInsertDiffSuffix
+						tableName = originalTableName
+
+						// Return the original query to let batch handler process it
+						return query, query, tableName, nil
 					}
 
 					// Capture the consistent suffix
@@ -692,7 +702,13 @@ func (s *Sharding) resolve(query string, args ...interface{}) (ftQuery, stQuery,
 			if len(suffixes) == 1 {
 				suffix = consistentSuffix
 			} else {
-				return ftQuery, stQuery, tableName, ErrInsertDiffSuffix
+				// Don't error immediately, let the batch handler deal with it
+				// Set tableName so the caller knows this needs batch processing
+				// rather than returning ErrInsertDiffSuffix
+				tableName = originalTableName
+
+				// Return the original query to let batch handler process it
+				return query, query, tableName, nil
 			}
 
 			shardedTableName := originalTableName + suffix
@@ -2465,9 +2481,12 @@ func (s *Sharding) handleMultiShardInsert(db *gorm.DB) error {
 		return nil
 	}
 
-	// Group records by shard suffix
-	recordsByShardSuffix := make(map[string][]interface{})
-	shardKeys := make(map[string]interface{})
+	// Enhanced logging
+	GetLogger().Debug("Processing batch insert with %d records for table %s", reflectValue.Len(), tableName)
+
+	// Group records by sharding key value to ensure complete separation
+	recordsByShardingKey := make(map[interface{}][]interface{})
+	shardsBySuffix := make(map[string][]interface{}) // For logging purposes
 
 	// Process each record to determine its shard
 	for i := 0; i < reflectValue.Len(); i++ {
@@ -2503,7 +2522,7 @@ func (s *Sharding) handleMultiShardInsert(db *gorm.DB) error {
 		if keyValue == nil {
 			// If we can't find the sharding key, proceed with normal processing
 			// It might fail later, but that's the expected behavior
-			debugLog("Could not extract sharding key %s from record, proceeding with normal processing", config.ShardingKey)
+			GetLogger().Debug("Could not extract sharding key %s from record %d, proceeding with normal processing", config.ShardingKey, i)
 			return nil
 		}
 
@@ -2513,23 +2532,40 @@ func (s *Sharding) handleMultiShardInsert(db *gorm.DB) error {
 			return err
 		}
 
-		// Store the sharding key for logging
-		shardKeys[suffix] = keyValue
+		// Add the sharding key to the logging map
+		keysForSuffix := shardsBySuffix[suffix]
+		keyExists := false
+		for _, existingKey := range keysForSuffix {
+			if existingKey == keyValue {
+				keyExists = true
+				break
+			}
+		}
+		if !keyExists {
+			shardsBySuffix[suffix] = append(shardsBySuffix[suffix], keyValue)
+		}
 
-		// Add record to the appropriate group
-		recordsByShardSuffix[suffix] = append(recordsByShardSuffix[suffix], record)
+		// Add record to the appropriate group BY SHARDING KEY VALUE
+		// This is the key change - group by sharding key value, not by suffix
+		recordsByShardingKey[keyValue] = append(recordsByShardingKey[keyValue], record)
 	}
 
-	// If all records belong to the same shard, proceed normally
-	if len(recordsByShardSuffix) <= 1 {
+	// If all records share the same sharding key, proceed normally
+	if len(recordsByShardingKey) <= 1 {
+		GetLogger().Debug("All %d records have the same sharding key, proceeding with normal processing", reflectValue.Len())
 		return nil
 	}
 
-	// Multiple shards detected - we need to split the operation
-	debugLog("Detected batch insert with records for multiple shards: %v", shardKeys)
+	// Enhanced logging to show what sharding keys map to which suffixes
+	for suffix, keys := range shardsBySuffix {
+		GetLogger().Debug("Shard suffix %s will receive records with sharding keys: %v", suffix, keys)
+	}
+
+	// Multiple sharding keys detected - we need to split the operation
+	GetLogger().Debug("Detected batch insert with records for %d different sharding key values", len(recordsByShardingKey))
 
 	// Process each group separately
-	for suffix, records := range recordsByShardSuffix {
+	for keyValue, records := range recordsByShardingKey {
 		// Create a new session with the same settings
 		session := db.Session(&gorm.Session{})
 
@@ -2542,12 +2578,16 @@ func (s *Sharding) handleMultiShardInsert(db *gorm.DB) error {
 		// Convert to interface
 		sliceInterface := newSlice.Interface()
 
+		// Get the suffix for this key value (for logging)
+		suffix, _ := getSuffix(keyValue, 0, true, config)
+
 		// Create records for this shard
-		debugLog("Processing batch of %d records for shard %s with key value %v",
-			len(records), suffix, shardKeys[suffix])
+		GetLogger().Debug("Processing batch of %d records for sharding key %v (suffix %s)",
+			len(records), keyValue, suffix)
 
 		if err := session.Create(sliceInterface).Error; err != nil {
-			return fmt.Errorf("failed to insert records for shard %s: %w", suffix, err)
+			return fmt.Errorf("failed to insert records for sharding key %v (suffix %s): %w",
+				keyValue, suffix, err)
 		}
 	}
 

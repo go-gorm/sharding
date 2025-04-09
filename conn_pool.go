@@ -82,6 +82,8 @@ func (pool ConnPool) PrepareContext(ctx context.Context, query string) (*sql.Stm
 func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	var (
 		curTime = time.Now()
+		result  sql.Result
+		err     error
 	)
 	// Context cancellation check prevents wasted resources when client connections drop
 	if ctx.Err() != nil {
@@ -93,12 +95,53 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	traceLog("[%s] ExecContext START: Query: %s", requestID, query)
 	defer traceLog("[%s] ExecContext END", requestID)
 
+	// Try to handle batch insert queries
+	queryCtx := &QueryContext{
+		Sharding: pool.sharding,
+		ConnPool: pool.ConnPool,
+	}
+	result, err = pool.sharding.HandleBatchInsert(queryCtx, query, args)
+	if err == nil {
+		// Batch insert was handled successfully
+		return result, nil
+	} else if err != ErrSkipBatchHandler {
+		// There was an actual error in batch handling
+		return nil, err
+	}
+
+	// Continue with normal query resolution
 	// Query resolution happens outside synchronized blocks to minimize lock contention
 	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
 	debugLog("ExecContext: FtQuery: %s\n StQuery: %s \n\tQuery: %s \n Table: %s. Error: %v",
 		ftQuery, stQuery, query, table, err)
 	// Using sync.Map prevents race conditions in concurrent environments
 	pool.sharding.querys.Store("last_query", stQuery)
+
+	// ErrInsertDiffSuffix check to handle multi-shard inserts
+	if err != nil && errors.Is(err, ErrInsertDiffSuffix) {
+		// When we detect multiple shards, try to use the batch handler
+		if strings.Contains(strings.ToUpper(query), "INSERT INTO") {
+			GetLogger().Debug("Detected INSERT with multiple shards, attempting batch handler")
+
+			// Try to handle batch insert queries
+			queryCtx := &QueryContext{
+				Sharding: pool.sharding,
+				ConnPool: pool.ConnPool,
+			}
+
+			result, batchErr := pool.sharding.HandleBatchInsert(queryCtx, query, args)
+			if batchErr == nil {
+				// Batch insert was handled successfully
+				GetLogger().Debug("Successfully handled multi-shard batch insert")
+				return result, nil
+			}
+
+			// If batch handling failed, log and continue with original error
+			GetLogger().Debug("Batch handler failed: %v, proceeding with original error", batchErr)
+		}
+
+		return nil, err
+	}
 
 	// Double-write ensures data consistency during migration from non-sharded to sharded tables
 	if table != "" && err != nil && errors.Is(err, ErrMissingShardingKey) {
@@ -111,7 +154,6 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 
 		// Fallback to original table maintains data availability even with incomplete sharding metadata
 		if doubleWrite {
-			var result sql.Result
 			pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
 				result, err = pool.ConnPool.ExecContext(ctx, ftQuery, args...)
 				rowsAffected, _ = result.RowsAffected()
@@ -152,7 +194,6 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	}
 
 	// Sharded query execution comes after main table to ensure at least one copy exists if process crashes
-	var result sql.Result
 	result, err = pool.ConnPool.ExecContext(ctx, stQuery, args...)
 	pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
 		rowsAffected, _ = result.RowsAffected()
@@ -181,6 +222,42 @@ func (pool *ConnPool) QueryContext(ctx context.Context, query string, args ...an
 
 	// ErrInsertDiffSuffix check is first to fail fast and prevent data corruption from partial operations
 	if err != nil && errors.Is(err, ErrInsertDiffSuffix) {
+		// When we detect multiple shards, try to use the batch handler
+		if strings.Contains(strings.ToUpper(query), "INSERT INTO") {
+			GetLogger().Debug("Detected INSERT with multiple shards, attempting batch handler")
+
+			// Try to handle batch insert queries
+			queryCtx := &QueryContext{
+				Sharding: pool.sharding,
+				ConnPool: pool.ConnPool,
+			}
+
+			result, batchErr := pool.sharding.HandleBatchInsert(queryCtx, query, args)
+			if batchErr == nil {
+				// Batch insert was handled successfully
+				GetLogger().Debug("Successfully handled multi-shard batch insert")
+
+				// For INSERT queries returning rows, create empty query result
+				// with just the number of affected rows
+				rowsAffected, _ := result.RowsAffected()
+				GetLogger().Debug("Batch insert affected %d rows", rowsAffected)
+
+				// For RETURNING clause, we need to return rows
+				if strings.Contains(strings.ToUpper(query), "RETURNING") {
+					// Need to run a dummy query that returns rows with the same schema
+					// but no actual data, since the batch insert is already done
+					dummyQuery := "SELECT * FROM " + table + " WHERE 1=0"
+					return pool.ConnPool.QueryContext(ctx, dummyQuery, []interface{}{}...)
+				}
+
+				// Run a dummy query that returns a result but no rows
+				return pool.ConnPool.QueryContext(ctx, "SELECT 1 WHERE 1=0", []interface{}{}...)
+			}
+
+			// If batch handling failed, log and continue with original error
+			GetLogger().Debug("Batch handler failed: %v, proceeding with original error", batchErr)
+		}
+
 		return nil, err
 	}
 

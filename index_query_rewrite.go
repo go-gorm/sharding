@@ -48,8 +48,8 @@ func DefaultQueryRewriteOptions() QueryRewriteOptions {
 	}
 }
 
-// QueryCacheEntry represents a cached query rewrite
-type QueryCacheEntry struct {
+// IndexQueryCacheEntry represents a cached query rewrite
+type IndexQueryCacheEntry struct {
 	OriginalQuery  string
 	RewrittenQuery string
 	Args           []interface{}
@@ -58,22 +58,22 @@ type QueryCacheEntry struct {
 	LastUsed       time.Time
 }
 
-// QueryCache caches rewritten queries
-type QueryCache struct {
-	entries    map[string]*QueryCacheEntry
+// IndexQueryCache caches rewritten queries
+type IndexQueryCache struct {
+	entries    map[string]*IndexQueryCacheEntry
 	maxEntries int
 }
 
-// NewQueryCache creates a new query cache
-func NewQueryCache(maxEntries int) *QueryCache {
-	return &QueryCache{
-		entries:    make(map[string]*QueryCacheEntry),
+// NewIndexQueryCache creates a new query cache
+func NewIndexQueryCache(maxEntries int) *IndexQueryCache {
+	return &IndexQueryCache{
+		entries:    make(map[string]*IndexQueryCacheEntry),
 		maxEntries: maxEntries,
 	}
 }
 
 // Get retrieves a cached query
-func (c *QueryCache) Get(query string, args []interface{}) (*QueryCacheEntry, bool) {
+func (c *IndexQueryCache) Get(query string, args []interface{}) (*IndexQueryCacheEntry, bool) {
 	key := c.makeKey(query, args)
 	entry, ok := c.entries[key]
 	if ok {
@@ -84,14 +84,14 @@ func (c *QueryCache) Get(query string, args []interface{}) (*QueryCacheEntry, bo
 }
 
 // Put adds a query to the cache
-func (c *QueryCache) Put(query string, args []interface{}, rewrittenQuery string, newArgs []interface{}) {
+func (c *IndexQueryCache) Put(query string, args []interface{}, rewrittenQuery string, newArgs []interface{}) {
 	// Check if cache is full
 	if len(c.entries) >= c.maxEntries {
 		c.evictLRU()
 	}
 
 	key := c.makeKey(query, args)
-	c.entries[key] = &QueryCacheEntry{
+	c.entries[key] = &IndexQueryCacheEntry{
 		OriginalQuery:  query,
 		RewrittenQuery: rewrittenQuery,
 		Args:           args,
@@ -102,7 +102,7 @@ func (c *QueryCache) Put(query string, args []interface{}, rewrittenQuery string
 }
 
 // makeKey creates a cache key from a query and args
-func (c *QueryCache) makeKey(query string, args []interface{}) string {
+func (c *IndexQueryCache) makeKey(query string, args []interface{}) string {
 	// Simplify the query by removing whitespace
 	query = strings.Join(strings.Fields(query), " ")
 
@@ -116,7 +116,7 @@ func (c *QueryCache) makeKey(query string, args []interface{}) string {
 }
 
 // evictLRU evicts the least recently used entry
-func (c *QueryCache) evictLRU() {
+func (c *IndexQueryCache) evictLRU() {
 	var oldestKey string
 	var oldestTime time.Time
 
@@ -138,7 +138,7 @@ func (c *QueryCache) evictLRU() {
 type QueryRewriter struct {
 	sharding *Sharding
 	options  QueryRewriteOptions
-	cache    *QueryCache
+	cache    *IndexQueryCache
 }
 
 // NewQueryRewriter creates a new query rewriter
@@ -150,9 +150,9 @@ func NewQueryRewriter(s *Sharding, options ...QueryRewriteOptions) *QueryRewrite
 		opts = DefaultQueryRewriteOptions()
 	}
 
-	var cache *QueryCache
+	var cache *IndexQueryCache
 	if opts.EnableQueryCache {
-		cache = NewQueryCache(opts.QueryCacheSize)
+		cache = NewIndexQueryCache(opts.QueryCacheSize)
 	}
 
 	return &QueryRewriter{
@@ -694,13 +694,13 @@ func (qr *QueryRewriter) buildRewrittenQuery(query, tableName string, suffixToID
 }
 
 // GetQueryCache returns the query cache for inspection
-func (qr *QueryRewriter) GetQueryCache() *QueryCache {
+func (qr *QueryRewriter) GetQueryCache() *IndexQueryCache {
 	return qr.cache
 }
 
 // ClearQueryCache clears the query cache
 func (qr *QueryRewriter) ClearQueryCache() {
 	if qr.cache != nil {
-		qr.cache.entries = make(map[string]*QueryCacheEntry)
+		qr.cache.entries = make(map[string]*IndexQueryCacheEntry)
 	}
 }
