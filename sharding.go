@@ -438,6 +438,7 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 			ftQuery = stmt.String()
 			stmt.FromItems = newTable
 			stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
+			replaceConditionTableName(stmt.Condition, tableName, newTable.Name.Name)
 			stQuery = stmt.String()
 		case *sqlparser.UpdateStatement:
 			ftQuery = stmt.String()
@@ -565,4 +566,19 @@ func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName
 	}
 
 	return orderBy
+}
+
+func replaceConditionTableName(condition sqlparser.Expr, oldName, newName string) {
+	if condition == nil {
+		return
+	}
+
+	sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
+		if x, ok := node.(*sqlparser.QualifiedRef); ok {
+			if x.Table.Name == oldName {
+				x.Table.Name = newName
+			}
+		}
+		return nil
+	}), condition)
 }
