@@ -402,7 +402,7 @@ func TestPKSnowflake(t *testing.T) {
 
 	node, _ := snowflake.NewNode(0)
 	sfid := node.Generate().Int64()
-	expected := fmt.Sprintf(`INSERT INTO orders_0 ("user_id", "product", "deleted", id) VALUES ($1, $2, $3, %d`, sfid)[0:68]
+	expected := fmt.Sprintf(`INSERT INTO orders_0 ("user_id", "product", "deleted", id) VALUES ($1, $2, $3, %d`, sfid)[0:83]
 	expected = toDialect(expected)
 
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
