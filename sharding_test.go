@@ -13,6 +13,7 @@ import (
 
 	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/assert"
+	"github.com/longbridgeapp/sqlparser"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -24,6 +25,7 @@ type Order struct {
 	ID      int64 `gorm:"primarykey"`
 	UserID  int64
 	Product string
+	Deleted gorm.DeletedAt
 }
 
 type Category struct {
@@ -160,21 +162,25 @@ func init() {
 		db.Exec(`CREATE TABLE ` + table + ` (
 			id bigint PRIMARY KEY,
 			user_id bigint,
-			product text
+			product text,
+			deleted timestamp NULL
 		)`)
 		dbNoID.Exec(`CREATE TABLE ` + table + ` (
 			user_id bigint,
-			product text
+			product text,
+			deleted timestamp NULL
 		)`)
 		dbRead.Exec(`CREATE TABLE ` + table + ` (
 			id bigint PRIMARY KEY,
 			user_id bigint,
-			product text
+			product text,
+			deleted timestamp NULL
 		)`)
 		dbWrite.Exec(`CREATE TABLE ` + table + ` (
 			id bigint PRIMARY KEY,
 			user_id bigint,
-			product text
+			product text,
+			deleted timestamp NULL
 		)`)
 	}
 
@@ -224,18 +230,18 @@ func TestMigrate(t *testing.T) {
 
 func TestInsert(t *testing.T) {
 	tx := db.Create(&Order{ID: 100, UserID: 100, Product: "iPhone"})
-	assertQueryResult(t, `INSERT INTO orders_0 ("user_id", "product", "id") VALUES ($1, $2, $3) RETURNING "id"`, tx)
+	assertQueryResult(t, `INSERT INTO orders_0 ("user_id", "product", "deleted", "id") VALUES ($1, $2, $3, $4) RETURNING "id"`, tx)
 }
 
 func TestInsertNoID(t *testing.T) {
 	dbNoID.Create(&Order{UserID: 100, Product: "iPhone"})
-	expected := `INSERT INTO orders_0 ("user_id", "product") VALUES ($1, $2) RETURNING "id"`
+	expected := `INSERT INTO orders_0 ("user_id", "product", "deleted") VALUES ($1, $2, $3) RETURNING "id"`
 	assert.Equal(t, toDialect(expected), middlewareNoID.LastQuery())
 }
 
 func TestFillID(t *testing.T) {
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
-	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES`
+	expected := `INSERT INTO orders_0 ("user_id", "product", "deleted", id) VALUES`
 	lastQuery := middleware.LastQuery()
 	assert.Equal(t, toDialect(expected), lastQuery[0:len(expected)])
 }
@@ -244,7 +250,7 @@ func TestInsertManyWithFillID(t *testing.T) {
 	err := db.Create([]Order{{UserID: 100, Product: "Mac"}, {UserID: 100, Product: "Mac Pro"}}).Error
 	assert.Equal[error, error](t, err, nil)
 
-	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, $sfid), ($3, $4, $sfid) RETURNING "id"`
+	expected := `INSERT INTO orders_0 ("user_id", "product", "deleted", id) VALUES ($1, $2, $3, $sfid), ($4, $5, $6, $sfid) RETURNING "id"`
 	lastQuery := middleware.LastQuery()
 	assertSfidQueryResult(t, toDialect(expected), lastQuery)
 }
@@ -256,57 +262,57 @@ func TestInsertDiffSuffix(t *testing.T) {
 
 func TestSelect1(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id", 101).Where("id", node.Generate().Int64()).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "user_id" = $1 AND "id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "user_id" = $1 AND "id" = $2 AND "orders_1"."deleted" IS NULL`, tx)
 }
 
 func TestSelect2(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Where("user_id", 101).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "id" = $1 AND "user_id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "id" = $1 AND "user_id" = $2 AND "orders_1"."deleted" IS NULL`, tx)
 }
 
 func TestSelect3(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Where("user_id = 101").Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "id" = $1 AND user_id = 101`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "id" = $1 AND user_id = 101 AND "orders_1"."deleted" IS NULL`, tx)
 }
 
 func TestSelect4(t *testing.T) {
 	tx := db.Model(&Order{}).Where("product", "iPad").Where("user_id", 100).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM orders_0 WHERE "product" = $1 AND "user_id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_0 WHERE "product" = $1 AND "user_id" = $2 AND "orders_0"."deleted" IS NULL`, tx)
 }
 
 func TestSelect5(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id = 101").Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM orders_1 WHERE user_id = 101`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE user_id = 101 AND "orders_1"."deleted" IS NULL`, tx)
 }
 
 func TestSelect6(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id", node.Generate().Int64()).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "id" = $1`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "id" = $1 AND "orders_1"."deleted" IS NULL`, tx)
 }
 
 func TestSelect7(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id", 101).Where("id > ?", node.Generate().Int64()).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "user_id" = $1 AND id > $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE "user_id" = $1 AND id > $2 AND "orders_1"."deleted" IS NULL`, tx)
 }
 
 func TestSelect8(t *testing.T) {
 	tx := db.Model(&Order{}).Where("id > ?", node.Generate().Int64()).Where("user_id", 101).Find(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM orders_1 WHERE id > $1 AND "user_id" = $2`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE id > $1 AND "user_id" = $2 AND "orders_1"."deleted" IS NULL`, tx)
 }
 
 func TestSelect9(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id = 101").First(&[]Order{})
-	assertQueryResult(t, `SELECT * FROM orders_1 WHERE user_id = 101 ORDER BY "orders_1"."id" LIMIT 1`, tx)
+	assertQueryResult(t, `SELECT * FROM orders_1 WHERE user_id = 101 AND "orders_1"."deleted" IS NULL ORDER BY "orders_1"."id" LIMIT 1`, tx)
 }
 
 func TestSelect10(t *testing.T) {
 	tx := db.Clauses(hints.Comment("select", "nosharding")).Model(&Order{}).Find(&[]Order{})
-	assertQueryResult(t, `SELECT /* nosharding */ * FROM "orders"`, tx)
+	assertQueryResult(t, `SELECT /* nosharding */ * FROM "orders" WHERE "orders"."deleted" IS NULL`, tx)
 }
 
 func TestSelect11(t *testing.T) {
 	tx := db.Clauses(hints.Comment("select", "nosharding")).Model(&Order{}).Where("user_id", 101).Find(&[]Order{})
-	assertQueryResult(t, `SELECT /* nosharding */ * FROM "orders" WHERE "user_id" = $1`, tx)
+	assertQueryResult(t, `SELECT /* nosharding */ * FROM "orders" WHERE "user_id" = $1 AND "orders"."deleted" IS NULL`, tx)
 }
 
 func TestSelect12(t *testing.T) {
@@ -323,18 +329,18 @@ func TestSelect13(t *testing.T) {
 
 func TestSelect14(t *testing.T) {
 	dbNoID.Model(&Order{}).Where("user_id = 101").Find(&[]Order{})
-	expected := `SELECT * FROM orders_1 WHERE user_id = 101`
+	expected := `SELECT * FROM orders_1 WHERE user_id = 101 AND "orders_1"."deleted" IS NULL`
 	assert.Equal(t, toDialect(expected), middlewareNoID.LastQuery())
 }
 
 func TestUpdate(t *testing.T) {
 	tx := db.Model(&Order{}).Where("user_id = ?", 100).Update("product", "new title")
-	assertQueryResult(t, `UPDATE orders_0 SET "product" = $1 WHERE user_id = $2`, tx)
+	assertQueryResult(t, `UPDATE orders_0 SET "product" = $1 WHERE user_id = $2 AND "orders_0"."deleted" IS NULL`, tx)
 }
 
 func TestDelete(t *testing.T) {
-	tx := db.Where("user_id = ?", 100).Delete(&Order{})
-	assertQueryResult(t, `DELETE FROM orders_0 WHERE user_id = $1`, tx)
+	tx := db.Unscoped().Where("user_id = ?", 100).Delete(&Order{ID: 1})
+	assertQueryResult(t, `DELETE FROM orders_0 WHERE user_id = $1 AND "orders_0"."id" = $2`, tx)
 }
 
 func TestInsertMissingShardingKey(t *testing.T) {
@@ -396,7 +402,7 @@ func TestPKSnowflake(t *testing.T) {
 
 	node, _ := snowflake.NewNode(0)
 	sfid := node.Generate().Int64()
-	expected := fmt.Sprintf(`INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, %d`, sfid)[0:68]
+	expected := fmt.Sprintf(`INSERT INTO orders_0 ("user_id", "product", "deleted", id) VALUES ($1, $2, $3, %d`, sfid)[0:68]
 	expected = toDialect(expected)
 
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
@@ -417,7 +423,7 @@ func TestPKPGSequence(t *testing.T) {
 
 	db.Exec("SELECT setval('" + pgSeqName("orders") + "', 42)")
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
-	expected := `INSERT INTO orders_0 ("user_id", "product", id) VALUES ($1, $2, 43) RETURNING "id"`
+	expected := `INSERT INTO orders_0 ("user_id", "product", "deleted", id) VALUES ($1, $2, $3, 43) RETURNING "id"`
 	assert.Equal(t, expected, middleware.LastQuery())
 }
 
@@ -435,7 +441,7 @@ func TestPKMySQLSequence(t *testing.T) {
 
 	db.Exec("UPDATE `" + mySQLSeqName("orders") + "` SET id = 42")
 	db.Create(&Order{UserID: 100, Product: "iPhone"})
-	expected := "INSERT INTO orders_0 (`user_id`, `product`, id) VALUES (?, ?, 43)"
+	expected := "INSERT INTO orders_0 (`user_id`, `product`, `deleted`, id) VALUES (?, ?, ?, 43)"
 	if mariadbDialector() {
 		expected = expected + " RETURNING `id`"
 	}
@@ -559,4 +565,69 @@ func mysqlDialector() bool {
 
 func mariadbDialector() bool {
 	return os.Getenv("DIALECTOR") == "mariadb"
+}
+
+// parseExpr parses a SQL boolean expression into an AST Expr node.
+func parseExpr(t *testing.T, src string) sqlparser.Expr {
+	p := sqlparser.NewParser(strings.NewReader(src))
+	expr, err := p.ParseExpr()
+	if err != nil {
+		t.Fatalf("failed to parse expr %q: %v", src, err)
+	}
+	return expr
+}
+
+func TestReplaceTableNameInCondition(t *testing.T) {
+	oldName := "orders"
+	newName := "orders_1"
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "simple equality",
+			input:    "orders.user_id = 5",
+			expected: "orders_1.user_id = 5",
+		},
+		{
+			name:     "LIKE operator",
+			input:    "orders.product LIKE '%foo%'",
+			expected: "orders_1.product LIKE '%foo%'",
+		},
+		{
+			name:     "IN list",
+			input:    "orders.id IN (1, 2, 3)",
+			expected: "orders_1.id IN (1, 2, 3)",
+		},
+		{
+			name:     "NOT IN list",
+			input:    "orders.id NOT IN (4,5)",
+			expected: "orders_1.id NOT IN (4, 5)",
+		},
+		{
+			name:     "BETWEEN",
+			input:    "orders.age BETWEEN 18 AND 30",
+			expected: "orders_1.age BETWEEN 18 AND 30",
+		},
+		{
+			name:     "nested AND/OR",
+			input:    "(orders.age > 18 AND orders.age < 30) OR orders.id = 7",
+			expected: "(orders_1.age > 18 AND orders_1.age < 30) OR orders_1.id = 7",
+		},
+		{
+			name:     "function call",
+			input:    "UPPER(orders.product) = 'FOO'",
+			expected: "UPPER(orders_1.product) = 'FOO'",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			expr := parseExpr(t, tc.input)
+			replaceTableNameInCondition(expr, oldName, newName)
+			assert.Equal(t, tc.expected, expr.String())
+		})
+	}
 }
