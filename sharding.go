@@ -393,7 +393,7 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 					if tblIdx == -1 {
 						return ftQuery, stQuery, tableName, errors.New("table suffix '" + suffix + "' is not in ShardingSuffixs. In order to generate the primary key, ShardingSuffixs should include all table suffixes")
 					}
-					//return ftQuery, stQuery, tableName, err
+					// return ftQuery, stQuery, tableName, err
 				}
 
 				id := r.PrimaryKeyGeneratorFn(int64(tblIdx))
@@ -438,14 +438,17 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 			ftQuery = stmt.String()
 			stmt.FromItems = newTable
 			stmt.OrderBy = replaceOrderByTableName(stmt.OrderBy, tableName, newTable.Name.Name)
+			replaceTableNameInCondition(stmt.Condition, tableName, newTable.Name.Name)
 			stQuery = stmt.String()
 		case *sqlparser.UpdateStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
+			replaceTableNameInCondition(stmt.Condition, tableName, newTable.Name.Name)
 			stQuery = stmt.String()
 		case *sqlparser.DeleteStatement:
 			ftQuery = stmt.String()
 			stmt.TableName = newTable
+			replaceTableNameInCondition(stmt.Condition, tableName, newTable.Name.Name)
 			stQuery = stmt.String()
 		}
 	}
@@ -466,6 +469,7 @@ func getSuffix(value any, id int64, keyFind bool, r Config) (suffix string, err 
 		}
 		suffix = r.ShardingAlgorithmByPrimaryKey(id)
 	}
+
 	return
 }
 
@@ -565,4 +569,20 @@ func replaceOrderByTableName(orderBy []*sqlparser.OrderingTerm, oldName, newName
 	}
 
 	return orderBy
+}
+
+// replaceTableNameInCondition walks the WHERE expression tree
+// and renames any qualified column references matching oldName → newName.
+func replaceTableNameInCondition(expr sqlparser.Expr, oldName, newName string) {
+	if expr == nil {
+		return
+	}
+
+	_ = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
+		if qr, ok := node.(*sqlparser.QualifiedRef); ok && qr.Table.Name == oldName {
+			qr.Table.Name = newName
+		}
+
+		return nil
+	}), expr)
 }
