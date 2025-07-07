@@ -28,7 +28,7 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 		curTime = time.Now()
 	)
 
-	ftQuery, stQuery, table, err := pool.sharding.resolve(query, args...)
+	ftQuery, stQuery, table, err := pool.sharding.resolve(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -36,11 +36,18 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	pool.sharding.querys.Store("last_query", stQuery)
 
 	if table != "" {
-		if r, ok := pool.sharding.configs[table]; ok {
+		key := table
+		key, err = pool.sharding.getConfigKey(ctx, table)
+		if err != nil {
+			return nil, err
+		}
+		if r, ok := pool.sharding.configs[key]; ok {
 			if r.DoubleWrite {
 				pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
 					result, _ := pool.ConnPool.ExecContext(ctx, ftQuery, args...)
-					rowsAffected, _ = result.RowsAffected()
+					if result != nil {
+						rowsAffected, _ = result.RowsAffected()
+					}
 					return pool.sharding.Explain(ftQuery, args...), rowsAffected
 				}, pool.sharding.Error)
 			}
@@ -50,7 +57,9 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 	var result sql.Result
 	result, err = pool.ConnPool.ExecContext(ctx, stQuery, args...)
 	pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
-		rowsAffected, _ = result.RowsAffected()
+		if result != nil {
+			rowsAffected, _ = result.RowsAffected()
+		}
 		return pool.sharding.Explain(stQuery, args...), rowsAffected
 	}, pool.sharding.Error)
 
@@ -63,7 +72,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...any
 		curTime = time.Now()
 	)
 
-	_, stQuery, _, err := pool.sharding.resolve(query, args...)
+	_, stQuery, _, err := pool.sharding.resolve(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +89,7 @@ func (pool ConnPool) QueryContext(ctx context.Context, query string, args ...any
 }
 
 func (pool ConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	_, query, _, _ = pool.sharding.resolve(query, args...)
+	_, query, _, _ = pool.sharding.resolve(ctx, query, args...)
 	pool.sharding.querys.Store("last_query", query)
 
 	return pool.ConnPool.QueryRowContext(ctx, query, args...)

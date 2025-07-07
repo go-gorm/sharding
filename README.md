@@ -77,6 +77,8 @@ err = db.Exec("DELETE FROM orders WHERE product_id = 3").Error
 fmt.Println(err) // ErrMissingShardingKey
 ```
 
+The example demonstrating a single table supporting multiple partitioning strategies is（单表支持多种分表策略的例子在这里）[here](./test/sharding_test.go).
+
 The full example is [here](./examples/order.go).
 
 > 🚨 NOTE: Gorm config `PrepareStmt: true` is not supported for now.
