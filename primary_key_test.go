@@ -3,7 +3,7 @@ package sharding
 import (
 	"testing"
 
-	"github.com/longbridgeapp/assert"
+	"github.com/longbridge/assert"
 )
 
 func Test_pgSeqName(t *testing.T) {

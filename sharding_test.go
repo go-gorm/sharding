@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/snowflake"
-	"github.com/longbridgeapp/assert"
+	"github.com/longbridge/assert"
 	"github.com/longbridgeapp/sqlparser"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
