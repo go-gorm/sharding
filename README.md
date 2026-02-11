@@ -36,11 +36,19 @@ import (
 
 db, err := gorm.Open(postgres.New(postgres.Config{DSN: "postgres://localhost:5432/sharding-db?sslmode=disable"))
 
-db.Use(sharding.Register(sharding.Config{
+db.Use(sharding.Register(map[any]sharding.Config{"orders": {
     ShardingKey:         "user_id",
     NumberOfShards:      64,
     PrimaryKeyGenerator: sharding.PKSnowflake,
-}, "orders", Notification{}, AuditLog{}))
+}, Notification{}: {
+    ShardingKey:         "user_id",
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
+}, AuditLog{}: {
+    ShardingKey:         "user_id",
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
+}}))
 // This case for show up give notifications, audit_logs table use same sharding rule.
 ```
 
@@ -97,11 +105,11 @@ Recommend options:
 Built-in Snowflake primary key generator.
 
 ```go
-db.Use(sharding.Register(sharding.Config{
+db.Use(sharding.Register(map[any]sharding.Config{"orders": {
     ShardingKey:         "user_id",
     NumberOfShards:      64,
     PrimaryKeyGenerator: sharding.PKSnowflake,
-}, "orders")
+}}))
 ```
 
 ### Use PostgreSQL Sequence
@@ -113,11 +121,11 @@ You don't need create sequence manually, Gorm Sharding check and create when the
 This sequence name followed `gorm_sharding_${table_name}_id_seq`, for example `orders` table, the sequence name is `gorm_sharding_orders_id_seq`.
 
 ```go
-db.Use(sharding.Register(sharding.Config{
+db.Use(sharding.Register(map[any]sharding.Config{"orders": {
     ShardingKey:         "user_id",
     NumberOfShards:      64,
     PrimaryKeyGenerator: sharding.PKPGSequence,
-}, "orders")
+}}))
 ```
 
 ### Use MySQL Sequence
@@ -129,11 +137,11 @@ You don't need create sequence manually, Gorm Sharding check and create when the
 This sequence name followed `gorm_sharding_${table_name}_id_seq`, for example `orders` table, the sequence name is `gorm_sharding_orders_id_seq`.
 
 ```go
-db.Use(sharding.Register(sharding.Config{
+db.Use(sharding.Register(map[any]sharding.Config{"orders": {
     ShardingKey:         "user_id",
     NumberOfShards:      64,
     PrimaryKeyGenerator: sharding.PKMySQLSequence,
-}, "orders")
+}}))
 ```
 
 ### No primary key
@@ -158,11 +166,11 @@ db.Use(dbresolver.Register(dbresolver.Config{
   Replicas: []gorm.Dialector{dbRead.Dialector},
 }))
 
-db.Use(sharding.Register(sharding.Config{
-  ShardingKey:         "user_id",
-  NumberOfShards:      64,
-  PrimaryKeyGenerator: sharding.PKSnowflake,
-}))
+db.Use(sharding.Register(map[any]sharding.Config{"orders": {
+    ShardingKey:         "user_id",
+    NumberOfShards:      64,
+    PrimaryKeyGenerator: sharding.PKSnowflake,
+}})))
 ```
 
 ## Sharding process

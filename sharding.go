@@ -31,8 +31,7 @@ type Sharding struct {
 	querys         sync.Map
 	snowflakeNodes []*snowflake.Node
 
-	_config Config
-	_tables []any
+	_configs map[any]Config
 
 	mutex sync.RWMutex
 }
@@ -103,10 +102,9 @@ type Config struct {
 	PrimaryKeyGeneratorFn func(tableIdx int64) int64
 }
 
-func Register(config Config, tables ...any) *Sharding {
+func Register(configs map[any]Config) *Sharding {
 	return &Sharding{
-		_config: config,
-		_tables: tables,
+		_configs: configs,
 	}
 }
 
@@ -114,13 +112,13 @@ func (s *Sharding) compile() error {
 	if s.configs == nil {
 		s.configs = make(map[string]Config)
 	}
-	for _, table := range s._tables {
+	for table, config := range s._configs {
 		if t, ok := table.(string); ok {
-			s.configs[t] = s._config
+			s.configs[t] = config
 		} else {
 			stmt := &gorm.Statement{DB: s.DB}
 			if err := stmt.Parse(table); err == nil {
-				s.configs[stmt.Table] = s._config
+				s.configs[stmt.Table] = config
 			} else {
 				return err
 			}
