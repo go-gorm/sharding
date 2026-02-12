@@ -110,6 +110,20 @@ func Register(config Config, tables ...any) *Sharding {
 	}
 }
 
+func RegisterWithConfig(config map[string]Config) *Sharding {
+	return &Sharding{
+		configs: config,
+	}
+}
+
+func RegisterWithModel(modelList ...ShardingInterface) *Sharding {
+	config := make(map[string]Config)
+	for _, item := range modelList {
+		config[item.TableName()] = item.Sharding()
+	}
+	return RegisterWithConfig(config)
+}
+
 func (s *Sharding) compile() error {
 	if s.configs == nil {
 		s.configs = make(map[string]Config)

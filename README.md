@@ -43,6 +43,37 @@ db.Use(sharding.Register(sharding.Config{
 }, "orders", Notification{}, AuditLog{}))
 // This case for show up give notifications, audit_logs table use same sharding rule.
 ```
+support multiple config with multiple model register
+model must implement ShardingInterface
+example: base_test.go
+```go
+type Order struct {
+    gorm.Model
+    UserID    uint64
+    ProductID int64
+    Amount    int64
+	
+	sharding.BaseSharding
+}
+
+func (Order) TableName() string {
+    return "order"
+}
+
+type OtherTable struct {
+    gorm.Model
+    UserID    uint64
+    
+    sharding.BaseSharding
+}
+
+func (OtherTable) TableName() string {
+    return "other_table"
+}
+
+
+db.Use(sharding.RegisterWithModel(&Order{}, &OtherTable{}))
+```
 
 Use the db session as usual. Just note that the query should have the `Sharding Key` when operate sharding tables.
 
