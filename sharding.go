@@ -421,7 +421,7 @@ func (s *Sharding) resolve(query string, args ...any) (ftQuery, stQuery, tableNa
 		var value any
 		var id int64
 		var keyFind bool
-		value, id, keyFind, err = s.nonInsertValue(r.ShardingKey, condition, args...)
+		value, id, keyFind, err = s.nonInsertValue(r, condition, args...)
 		if err != nil {
 			return
 		}
@@ -501,7 +501,7 @@ func (s *Sharding) insertValue(key string, names []*sqlparser.Ident, exprs []sql
 	return
 }
 
-func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...any) (value any, id int64, keyFind bool, err error) {
+func (s *Sharding) nonInsertValue(r Config, condition sqlparser.Expr, args ...any) (value any, id int64, keyFind bool, err error) {
 	err = sqlparser.Walk(sqlparser.VisitFunc(func(node sqlparser.Node) error {
 		if n, ok := node.(*sqlparser.BinaryExpr); ok {
 			x, ok := n.X.(*sqlparser.Ident)
@@ -512,7 +512,7 @@ func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...
 				}
 			}
 			if ok {
-				if x.Name == key && n.Op == sqlparser.EQ {
+				if x.Name == r.ShardingKey && n.Op == sqlparser.EQ {
 					keyFind = true
 					switch expr := n.Y.(type) {
 					case *sqlparser.BindExpr:
@@ -529,12 +529,26 @@ func (s *Sharding) nonInsertValue(key string, condition sqlparser.Expr, args ...
 					switch expr := n.Y.(type) {
 					case *sqlparser.BindExpr:
 						v := args[expr.Pos]
+						if r.ShardingAlgorithm != nil {
+							keyFind = true
+							if value == nil {
+								value = v
+							}
+							return nil
+						}
 						var ok bool
 						if id, ok = v.(int64); !ok {
 							return fmt.Errorf("ID should be int64 type")
 						}
 					case *sqlparser.NumberLit:
 						id, err = strconv.ParseInt(expr.Value, 10, 64)
+						if r.ShardingAlgorithm != nil {
+							keyFind = true
+							if value == nil {
+								value = id
+							}
+							return nil
+						}
 						if err != nil {
 							return err
 						}
