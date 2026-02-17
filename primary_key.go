@@ -56,9 +56,18 @@ func (s *Sharding) createMySQLSequenceKeyIfNotExist(tableName string) error {
 	if stmt.Error != nil {
 		return fmt.Errorf("failed to create sequence table: %w", stmt.Error)
 	}
-	stmt = s.DB.Exec("INSERT INTO `" + mySQLSeqName(tableName) + "` VALUES (0)")
-	if stmt.Error != nil {
-		return fmt.Errorf("failed to insert into sequence table: %w", stmt.Error)
+	var count int
+	err := s.DB.Raw("SELECT COUNT(*) FROM `" + mySQLSeqName(tableName) + "`").Scan(&count).Error
+	if err != nil {
+		return fmt.Errorf("failed to check sequence table data: %w", err)
+	}
+
+	// Insert initial values only when there is no data in the table
+	if count == 0 {
+		stmt = s.DB.Exec("INSERT INTO `" + mySQLSeqName(tableName) + "` VALUES (0)")
+		if stmt.Error != nil {
+			return fmt.Errorf("failed to insert into sequence table: %w", stmt.Error)
+		}
 	}
 	return nil
 }
