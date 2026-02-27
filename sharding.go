@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/bwmarrin/snowflake"
 	"github.com/longbridgeapp/sqlparser"
@@ -24,6 +25,8 @@ var (
 	ShardingIgnoreStoreKey = "sharding_ignore"
 )
 
+var shardingSeq uint64
+
 type Sharding struct {
 	*gorm.DB
 	ConnPool       *ConnPool
@@ -31,10 +34,15 @@ type Sharding struct {
 	querys         sync.Map
 	snowflakeNodes []*snowflake.Node
 
-	_config Config
-	_tables []any
+	_configEntries []configEntry
+	_seq           uint64
 
 	mutex sync.RWMutex
+}
+
+type configEntry struct {
+	config Config
+	tables []any
 }
 
 // Config specifies the configuration for sharding.
@@ -103,26 +111,44 @@ type Config struct {
 	PrimaryKeyGeneratorFn func(tableIdx int64) int64
 }
 
+// Register creates a Sharding middleware for the given config and tables.
+// Multiple Sharding instances can be registered on the same db via db.Use(),
+// and their configs will be merged into the first registered instance.
+//
+//	middleware := sharding.Register(configA, "orders")
+//	middlewareItem := sharding.Register(configB, "order_items")
+//	db.Use(middleware)
+//	db.Use(middlewareItem)
 func Register(config Config, tables ...any) *Sharding {
-	return &Sharding{
-		_config: config,
-		_tables: tables,
+	s := &Sharding{
+		_seq: atomic.AddUint64(&shardingSeq, 1),
 	}
+	s._configEntries = append(s._configEntries, configEntry{config: config, tables: tables})
+	return s
+}
+
+// Register appends additional tables with a different config to the same
+// Sharding instance, allowing chain-style registration.
+func (s *Sharding) Register(config Config, tables ...any) *Sharding {
+	s._configEntries = append(s._configEntries, configEntry{config: config, tables: tables})
+	return s
 }
 
 func (s *Sharding) compile() error {
 	if s.configs == nil {
 		s.configs = make(map[string]Config)
 	}
-	for _, table := range s._tables {
-		if t, ok := table.(string); ok {
-			s.configs[t] = s._config
-		} else {
-			stmt := &gorm.Statement{DB: s.DB}
-			if err := stmt.Parse(table); err == nil {
-				s.configs[stmt.Table] = s._config
+	for _, entry := range s._configEntries {
+		for _, table := range entry.tables {
+			if t, ok := table.(string); ok {
+				s.configs[t] = entry.config
 			} else {
-				return err
+				stmt := &gorm.Statement{DB: s.DB}
+				if err := stmt.Parse(table); err == nil {
+					s.configs[stmt.Table] = entry.config
+				} else {
+					return err
+				}
 			}
 		}
 	}
@@ -222,9 +248,13 @@ func (s *Sharding) compile() error {
 	return nil
 }
 
-// Name plugin name for Gorm plugin interface
+// Name plugin name for Gorm plugin interface.
+// Each instance returns a unique name so multiple db.Use() calls are accepted.
 func (s *Sharding) Name() string {
-	return "gorm:sharding"
+	if s._seq <= 1 {
+		return "gorm:sharding"
+	}
+	return fmt.Sprintf("gorm:sharding:%d", s._seq)
 }
 
 // LastQuery get last SQL query
@@ -238,6 +268,15 @@ func (s *Sharding) LastQuery() string {
 
 // Initialize implement for Gorm plugin interface
 func (s *Sharding) Initialize(db *gorm.DB) error {
+	// If a Sharding plugin is already registered, merge our config entries
+	// into that primary instance and re-compile. Skip duplicate init.
+	if existing, ok := db.Plugins["gorm:sharding"]; ok {
+		if primary, ok := existing.(*Sharding); ok {
+			primary._configEntries = append(primary._configEntries, s._configEntries...)
+			return primary.compile()
+		}
+	}
+
 	db.Dialector = NewShardingDialector(db.Dialector, s)
 	s.DB = db
 	s.registerCallbacks(db)

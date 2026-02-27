@@ -631,3 +631,71 @@ func TestReplaceTableNameInCondition(t *testing.T) {
 		})
 	}
 }
+
+func TestMultipleDBUse(t *testing.T) {
+	var testDB *gorm.DB
+	if mysqlDialector() {
+		testDB, _ = gorm.Open(mysql.Open(dbURL()), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	} else {
+		testDB, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	}
+
+	configA := Config{
+		ShardingKey:         "user_id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKSnowflake,
+	}
+	configB := Config{
+		ShardingKey:         "product_id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKSnowflake,
+	}
+
+	middlewareA := Register(configA, "orders")
+	middlewareB := Register(configB, "categories")
+
+	err := testDB.Use(middlewareA)
+	assert.Equal[error, error](t, err, nil)
+
+	err = testDB.Use(middlewareB)
+	assert.Equal[error, error](t, err, nil)
+
+	// Verify both tables are registered in the primary instance's configs
+	assert.Equal(t, "user_id", middlewareA.configs["orders"].ShardingKey)
+	assert.Equal(t, "product_id", middlewareA.configs["categories"].ShardingKey)
+}
+
+func TestChainRegister(t *testing.T) {
+	var testDB *gorm.DB
+	if mysqlDialector() {
+		testDB, _ = gorm.Open(mysql.Open(dbURL()), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	} else {
+		testDB, _ = gorm.Open(postgres.New(dbConfig), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+	}
+
+	configA := Config{
+		ShardingKey:         "user_id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKSnowflake,
+	}
+	configB := Config{
+		ShardingKey:         "product_id",
+		NumberOfShards:      4,
+		PrimaryKeyGenerator: PKSnowflake,
+	}
+
+	m := Register(configA, "orders").Register(configB, "categories")
+	err := testDB.Use(m)
+	assert.Equal[error, error](t, err, nil)
+
+	assert.Equal(t, "user_id", m.configs["orders"].ShardingKey)
+	assert.Equal(t, "product_id", m.configs["categories"].ShardingKey)
+}
