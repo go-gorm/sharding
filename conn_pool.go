@@ -52,6 +52,9 @@ func (pool ConnPool) ExecContext(ctx context.Context, query string, args ...any)
 
 	var result sql.Result
 	result, err = pool.ConnPool.ExecContext(ctx, stQuery, args...)
+	if err != nil {
+		return nil, err
+	}
 	pool.sharding.Logger.Trace(ctx, curTime, func() (sql string, rowsAffected int64) {
 		if result != nil {
 			rowsAffected, _ = result.RowsAffected()
